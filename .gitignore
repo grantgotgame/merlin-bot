@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+*.egg
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Briefing data (personal state, generated at runtime)
+briefing/*.json
+
+# Runtime state
+state.json
+/tmp/
+
+# Audio files (generated at runtime)
+*.wav
+*.mp3
+!sounds/*.mp3
+
+# Logs
+logs/
+*.log
+
+# Models (downloaded, too large for git)
+models/*.onnx
+
+# macOS
+.DS_Store
