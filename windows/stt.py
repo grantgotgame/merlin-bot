@@ -10,11 +10,19 @@ from config import WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE, WHISPER_LANGU
 class STT:
     def __init__(self):
         print(f"[stt] Loading Whisper '{WHISPER_MODEL}' on {WHISPER_DEVICE}...")
-        self.model = WhisperModel(
-            WHISPER_MODEL,
-            device=WHISPER_DEVICE,
-            compute_type=WHISPER_COMPUTE,
-        )
+        try:
+            self.model = WhisperModel(
+                WHISPER_MODEL,
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE,
+            )
+        except Exception as e:
+            if WHISPER_DEVICE != "cpu":
+                print(f"[stt] GPU load failed ({e})")
+                print("[stt] Falling back to CPU (int8). Run: pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 to fix GPU.")
+                self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+            else:
+                raise
         print("[stt] Whisper loaded.")
 
     def transcribe(self, audio):

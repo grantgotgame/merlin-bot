@@ -112,6 +112,11 @@ if (-not (Test-Path $ReqFile)) {
         if ($exitCode -eq 0) {
             Pass "All packages installed"
             Record "Install deps" $true
+            # Try to add CUDA math libraries for GPU speech-to-text
+            Write-Host "  Installing CUDA libs for GPU STT (optional)..." -ForegroundColor DarkGray
+            & $VenvPip install nvidia-cublas-cu12 nvidia-cudnn-cu12 --quiet 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Pass "CUDA math libs installed (GPU STT ready)" }
+            else { Warn "CUDA math libs skipped -- STT will use CPU if GPU init fails" }
         } else {
             if ($output -match "onnxruntime-gpu") {
                 Warn "onnxruntime-gpu failed -- trying onnxruntime (CPU) as fallback..."
@@ -312,7 +317,7 @@ try {
 Step 8 10 "Checking EMEET PIXY camera..."
 
 if (Test-Path $VenvPython) {
-    $camScript = @"
+    $camScript = @'
 import sys
 try:
     import cv2
@@ -322,19 +327,19 @@ try:
         if cap.isOpened():
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            found.append(f"  index {i}: {w}x{h}")
+            found.append('  index ' + str(i) + ': ' + str(w) + 'x' + str(h))
             cap.release()
     if found:
-        print("CAMERAS_FOUND")
-        for f in found:
-            print(f)
+        print('CAMERAS_FOUND')
+        for line in found:
+            print(line)
     else:
-        print("NO_CAMERAS")
+        print('NO_CAMERAS')
 except ImportError:
-    print("CV2_NOT_INSTALLED")
+    print('CV2_NOT_INSTALLED')
 except Exception as e:
-    print(f"ERROR:{e}")
-"@
+    print('ERROR:' + str(e))
+'@
 
     try {
         $camResult = & $VenvPython -c $camScript 2>&1
@@ -344,62 +349,62 @@ except Exception as e:
             foreach ($line in $lines) { Write-Host "    $line" -ForegroundColor Green }
 
             $wmiCams = Get-PnpDevice -Class "Camera" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "OK" }
-            $pixyCam = $wmiCams | Where-Object { $_.FriendlyName -match "EMEET|PIXY" }
+            $pixyCam = $wmiCams | Where-Object { $_.FriendlyName -match "EMEET|PIXY|Piko" }
             if ($pixyCam) {
-                Pass "EMEET PIXY confirmed: $($pixyCam.FriendlyName)"
-                Record "EMEET PIXY" $true $pixyCam.FriendlyName
+                Pass "EMEET camera confirmed: $($pixyCam.FriendlyName)"
+                Record "EMEET camera" $true $pixyCam.FriendlyName
             } else {
-                Warn "Camera found but EMEET PIXY not specifically identified."
-                Warn "Make sure EMEET PIXY is connected via USB."
-                Record "EMEET PIXY" $true "Camera present (PIXY not specifically identified)"
+                Warn "Camera found but EMEET not specifically identified."
+                Warn "Make sure EMEET camera is connected via USB."
+                Record "EMEET camera" $true "Camera present (EMEET not specifically identified)"
             }
         } elseif ($camResult -match "NO_CAMERAS") {
-            Fail "No cameras detected. Plug in EMEET PIXY via USB."
-            Record "EMEET PIXY" $false "No cameras found"
+            Fail "No cameras detected. Plug in your EMEET camera via USB."
+            Record "EMEET camera" $false "No cameras found"
         } elseif ($camResult -match "CV2_NOT_INSTALLED") {
             Warn "opencv not installed yet -- camera check skipped"
-            Record "EMEET PIXY" $false "opencv not installed"
+            Record "EMEET camera" $false "opencv not installed"
         } else {
             Fail "Camera check error: $camResult"
-            Record "EMEET PIXY" $false "$camResult"
+            Record "EMEET camera" $false "$camResult"
         }
     } catch {
         Fail "Camera probe failed: $_"
-        Record "EMEET PIXY" $false "$_"
+        Record "EMEET camera" $false "$_"
     }
 } else {
     Warn "venv Python not available -- camera check skipped"
-    Record "EMEET PIXY" $false "Python venv not ready"
+    Record "EMEET camera" $false "Python venv not ready"
 }
 
 # --- STEP 9: Audio test ---
 Step 9 10 "Running audio device test..."
 
 if (Test-Path $VenvPython) {
-    $audioScript = @"
+    $audioScript = @'
 import sys
 try:
     import sounddevice as sd
-    devices    = sd.query_devices()
-    inputs     = [d for d in devices if d['max_input_channels'] > 0]
-    outputs    = [d for d in devices if d['max_output_channels'] > 0]
+    devices     = sd.query_devices()
+    inputs      = [d for d in devices if d['max_input_channels'] > 0]
+    outputs     = [d for d in devices if d['max_output_channels'] > 0]
     default_in  = sd.query_devices(kind='input')
     default_out = sd.query_devices(kind='output')
-    print(f"INPUT_DEVICES:{len(inputs)}")
-    print(f"OUTPUT_DEVICES:{len(outputs)}")
-    print(f"DEFAULT_IN:{default_in['name']}")
-    print(f"DEFAULT_OUT:{default_out['name']}")
+    print('INPUT_DEVICES:' + str(len(inputs)))
+    print('OUTPUT_DEVICES:' + str(len(outputs)))
+    print('DEFAULT_IN:' + default_in['name'])
+    print('DEFAULT_OUT:' + default_out['name'])
     import numpy as np
     t    = np.linspace(0, 0.3, int(0.3 * 44100), endpoint=False)
     tone = (0.15 * np.sin(2 * np.pi * 440 * t)).astype('float32')
     sd.play(tone, 44100)
     sd.wait()
-    print("PLAYBACK_OK")
+    print('PLAYBACK_OK')
 except ImportError:
-    print("SOUNDDEVICE_NOT_INSTALLED")
+    print('SOUNDDEVICE_NOT_INSTALLED')
 except Exception as e:
-    print(f"AUDIO_ERROR:{e}")
-"@
+    print('AUDIO_ERROR:' + str(e))
+'@
 
     try {
         $audioResult = & $VenvPython -c $audioScript 2>&1
@@ -411,10 +416,14 @@ except Exception as e:
             Fail "Audio error: $($Matches[1])"
             Record "Audio test" $false $Matches[1]
         } else {
-            $inLine = ($audioResult | Select-String "INPUT_DEVICES:(\d+)").Matches[0].Groups[1].Value
-            $outLine = ($audioResult | Select-String "OUTPUT_DEVICES:(\d+)").Matches[0].Groups[1].Value
-            $defIn   = ($audioResult | Select-String "DEFAULT_IN:(.+)").Matches[0].Groups[1].Value
-            $defOut  = ($audioResult | Select-String "DEFAULT_OUT:(.+)").Matches[0].Groups[1].Value
+            $inM  = $audioResult | Select-String 'INPUT_DEVICES:(\d+)'
+            $outM = $audioResult | Select-String 'OUTPUT_DEVICES:(\d+)'
+            $inDM = $audioResult | Select-String 'DEFAULT_IN:(.+)'
+            $ouDM = $audioResult | Select-String 'DEFAULT_OUT:(.+)'
+            $inLine  = if ($inM)  { $inM.Matches[0].Groups[1].Value }  else { '?' }
+            $outLine = if ($outM) { $outM.Matches[0].Groups[1].Value } else { '?' }
+            $defIn   = if ($inDM) { $inDM.Matches[0].Groups[1].Value } else { 'unknown' }
+            $defOut  = if ($ouDM) { $ouDM.Matches[0].Groups[1].Value } else { 'unknown' }
 
             Pass "Audio devices: $inLine input(s), $outLine output(s)"
             Pass "Default mic:     $defIn"

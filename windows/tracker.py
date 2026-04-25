@@ -5,6 +5,7 @@ Runs in its own thread. Fires callbacks on face_arrived / face_lost.
 
 import cv2
 import os
+import subprocess
 import time
 import urllib.request
 from config import (
@@ -61,10 +62,51 @@ class FaceTracker:
             print("[tracker] Face tracking disabled until model file is present.")
             self._download_failed = True
 
+    def _find_camera(self):
+        """
+        Auto-detect EMEET/PIXY/Piko camera index.
+        Uses Windows WMI enumeration order (matches DirectShow index).
+        Falls back to first working camera, then to CAMERA_INDEX / 0.
+        """
+        if CAMERA_INDEX is not None:
+            return CAMERA_INDEX
+
+        # Ask Windows which cameras are connected, in registration order.
+        # WMI enumeration order == DirectShow index on most Windows setups.
+        try:
+            result = subprocess.run(
+                ["powershell", "-NonInteractive", "-Command",
+                 "Get-PnpDevice -Class Camera -ErrorAction SilentlyContinue "
+                 "| Where-Object { $_.Status -eq 'OK' } "
+                 "| Select-Object -ExpandProperty FriendlyName"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                names = [n.strip() for n in result.stdout.strip().splitlines() if n.strip()]
+                for idx, name in enumerate(names):
+                    if any(k in name.lower() for k in ("emeet", "pixy", "piko")):
+                        print(f"[tracker] Auto-detected EMEET camera: '{name}' (index {idx})")
+                        return idx
+        except Exception as e:
+            print(f"[tracker] WMI camera probe failed: {e}")
+
+        # Fallback: probe cv2 indices and return first that opens
+        for i in range(5):
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                cap.release()
+                print(f"[tracker] Camera auto-detected at index {i}")
+                return i
+            cap.release()
+
+        print("[tracker] No camera detected -- defaulting to index 0")
+        return 0
+
     def _init_camera(self):
-        """Open the PIXY camera via DirectShow."""
-        print(f"[tracker] Opening camera index {CAMERA_INDEX}...")
-        self.cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+        """Open the EMEET camera via DirectShow."""
+        idx = self._find_camera()
+        print(f"[tracker] Opening camera index {idx}...")
+        self.cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)

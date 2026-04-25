@@ -67,7 +67,7 @@ NEVERMIND_WORDS = ["nevermind", "never mind"]
 # ============================================================
 # Face Tracking (OpenCV + YuNet)
 # ============================================================
-CAMERA_INDEX = 0          # USB camera index (try 0, 1, or 2)
+CAMERA_INDEX = None       # None = auto-detect; set to 0/1/2 to override
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30

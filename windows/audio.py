@@ -34,8 +34,8 @@ class AudioPipeline:
         for i, d in enumerate(devices):
             if d["max_input_channels"] > 0:
                 name = d["name"].lower()
-                if "emeet" in name or "pixy" in name:
-                    print(f"[audio] Found PIXY mic: [{i}] {d['name']}")
+                if "emeet" in name or "pixy" in name or "piko" in name:
+                    print(f"[audio] Found EMEET mic: [{i}] {d['name']}")
                     return i
 
         default = sd.default.device[0]
