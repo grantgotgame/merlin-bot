@@ -47,3 +47,4 @@ training/mlx/
 windows/venv/
 windows/*.onnx
 windows/merlin.ico
+/.claude
