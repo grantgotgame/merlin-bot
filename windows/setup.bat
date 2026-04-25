@@ -35,19 +35,32 @@ if not exist face_detection_yunet_2023mar.onnx (
     echo Already exists.
 )
 
-:: Check for Kokoro model files
+:: Download Kokoro model files if missing
 echo.
-echo [4/5] Checking Kokoro TTS models...
+echo [4/5] Downloading Kokoro TTS models (if needed)...
 if not exist kokoro-v1.0.onnx (
-    echo.
-    echo !! MANUAL STEP REQUIRED !!
-    echo Download these two files into this folder:
-    echo   1. kokoro-v1.0.onnx
-    echo   2. voices-v1.0.bin
-    echo From: https://github.com/thewh1teagle/kokoro-onnx/releases
-    echo.
+    echo   Downloading kokoro-v1.0.onnx (310 MB) -- please wait...
+    python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx', 'kokoro-v1.0.onnx'); print('  Downloaded.')"
+    if errorlevel 1 (
+        echo   ERROR: Download failed. Manually download kokoro-v1.0.onnx from:
+        echo   https://github.com/thewh1teagle/kokoro-onnx/releases
+        pause
+        exit /b 1
+    )
 ) else (
-    echo Kokoro models found.
+    echo   kokoro-v1.0.onnx already exists.
+)
+if not exist voices-v1.0.bin (
+    echo   Downloading voices-v1.0.bin (27 MB) -- please wait...
+    python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin', 'voices-v1.0.bin'); print('  Downloaded.')"
+    if errorlevel 1 (
+        echo   ERROR: Download failed. Manually download voices-v1.0.bin from:
+        echo   https://github.com/thewh1teagle/kokoro-onnx/releases
+        pause
+        exit /b 1
+    )
+) else (
+    echo   voices-v1.0.bin already exists.
 )
 
 :: Check LM Studio
