@@ -46,3 +46,4 @@ training/mlx/
 # Windows build artifacts
 windows/venv/
 windows/*.onnx
+windows/merlin.ico

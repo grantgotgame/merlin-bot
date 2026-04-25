@@ -1,12 +1,12 @@
-# Merlin Windows Installer — PowerShell validation + setup
-# Usage: .\install.ps1  (from C:\merlin\windows)
-# Creates venv, installs deps, downloads models, verifies camera/audio, checks LM Studio.
+# Merlin Windows Installer -- PowerShell validation + setup
+# Usage: .\install.ps1  (from the windows/ folder)
+# Creates venv, installs deps, downloads models, creates shortcut, verifies hardware.
 
 $ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 if (-not $ScriptDir -or $ScriptDir -eq "") { $ScriptDir = Get-Location }
 
-# ─── Color helpers ────────────────────────────────────────────────────────────
+# --- Color helpers ---
 function Pass($msg)  { Write-Host "  [PASS] $msg" -ForegroundColor Green }
 function Fail($msg)  { Write-Host "  [FAIL] $msg" -ForegroundColor Red }
 function Warn($msg)  { Write-Host "  [WARN] $msg" -ForegroundColor Yellow }
@@ -21,20 +21,19 @@ function Banner($msg) {
     Write-Host ("=" * 56) -ForegroundColor DarkCyan
 }
 
-# ─── Result tracker ───────────────────────────────────────────────────────────
+# --- Result tracker ---
 $Results = [ordered]@{}
-
 function Record($key, $passed, $detail = "") {
     $Results[$key] = @{ Passed = $passed; Detail = $detail }
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-Banner "Merlin — Windows Installer"
+# ==========================================================
+Banner "Merlin -- Windows Installer"
 Write-Host "  Working directory: $ScriptDir" -ForegroundColor DarkGray
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==========================================================
 
-# ─── STEP 1: Python 3.10+ ─────────────────────────────────────────────────────
-Step 1 9 "Checking Python version..."
+# --- STEP 1: Python 3.10+ ---
+Step 1 10 "Checking Python version..."
 
 $PythonCmd = $null
 foreach ($candidate in @("python", "python3", "py")) {
@@ -49,7 +48,7 @@ foreach ($candidate in @("python", "python3", "py")) {
                 Record "Python 3.10+" $true $ver
                 break
             } else {
-                Fail "Found $ver — need 3.10 or higher"
+                Fail "Found $ver -- need 3.10 or higher"
                 Record "Python 3.10+" $false $ver
             }
         }
@@ -58,23 +57,23 @@ foreach ($candidate in @("python", "python3", "py")) {
 
 if (-not $PythonCmd) {
     Fail "Python not found in PATH."
-    Warn "Install Python 3.11+ from https://python.org — check 'Add to PATH' during install."
+    Warn "Install Python 3.11+ from https://python.org -- check 'Add to PATH' during install."
     Record "Python 3.10+" $false "Not found"
     Write-Host ""
     Write-Host "Cannot continue without Python. Exiting." -ForegroundColor Red
     exit 1
 }
 
-# ─── STEP 2: Create venv ─────────────────────────────────────────────────────
-Step 2 9 "Creating virtual environment in venv/..."
+# --- STEP 2: Create venv ---
+Step 2 10 "Creating virtual environment in venv/..."
 
-$VenvDir = Join-Path $ScriptDir "venv"
+$VenvDir    = Join-Path $ScriptDir "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $VenvPip    = Join-Path $VenvDir "Scripts\pip.exe"
 
 try {
     if (Test-Path $VenvDir) {
-        Warn "venv/ already exists — skipping creation"
+        Warn "venv/ already exists -- skipping creation"
         Record "Create venv" $true "Already exists"
     } else {
         & $PythonCmd -m venv $VenvDir 2>&1 | Out-Null
@@ -82,7 +81,7 @@ try {
             Pass "Virtual environment created at venv/"
             Record "Create venv" $true $VenvDir
         } else {
-            throw "venv creation failed — $VenvPython not found"
+            throw "venv creation failed -- $VenvPython not found"
         }
     }
 } catch {
@@ -90,8 +89,8 @@ try {
     Record "Create venv" $false "$_"
 }
 
-# ─── STEP 3: Install dependencies ─────────────────────────────────────────────
-Step 3 9 "Installing Python packages from requirements.txt..."
+# --- STEP 3: Install dependencies ---
+Step 3 10 "Installing Python packages from requirements.txt..."
 
 $ReqFile = Join-Path $ScriptDir "requirements.txt"
 
@@ -99,7 +98,7 @@ if (-not (Test-Path $ReqFile)) {
     Fail "requirements.txt not found at $ReqFile"
     Record "Install deps" $false "requirements.txt missing"
 } elseif (-not (Test-Path $VenvPip)) {
-    Fail "pip not found in venv — skipping install"
+    Fail "pip not found in venv -- skipping install"
     Record "Install deps" $false "pip missing"
 } else {
     try {
@@ -107,16 +106,15 @@ if (-not (Test-Path $ReqFile)) {
         & $VenvPip install --upgrade pip --quiet 2>&1 | Out-Null
 
         Write-Host "  Installing packages (this may take a few minutes)..." -ForegroundColor DarkGray
-        $output = & $VenvPip install -r $ReqFile 2>&1
+        $output   = & $VenvPip install -r $ReqFile 2>&1
         $exitCode = $LASTEXITCODE
 
         if ($exitCode -eq 0) {
             Pass "All packages installed"
             Record "Install deps" $true
         } else {
-            # Check for partial failure — GPU onnxruntime fallback
             if ($output -match "onnxruntime-gpu") {
-                Warn "onnxruntime-gpu failed — trying onnxruntime (CPU) as fallback..."
+                Warn "onnxruntime-gpu failed -- trying onnxruntime (CPU) as fallback..."
                 & $VenvPip install onnxruntime --quiet 2>&1 | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Warn "Installed onnxruntime (CPU). GPU acceleration unavailable."
@@ -137,14 +135,14 @@ if (-not (Test-Path $ReqFile)) {
     }
 }
 
-# ─── STEP 4: Download YuNet model ─────────────────────────────────────────────
-Step 4 9 "Downloading YuNet face detection model..."
+# --- STEP 4: Download YuNet face detection model ---
+Step 4 10 "Downloading YuNet face detection model..."
 
 $YuNetPath = Join-Path $ScriptDir "face_detection_yunet_2023mar.onnx"
 $YuNetUrl  = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 if (Test-Path $YuNetPath) {
-    Pass "YuNet model already exists — skipping download"
+    Pass "YuNet model already exists -- skipping download"
     Record "YuNet model" $true "Already present"
 } else {
     try {
@@ -165,24 +163,24 @@ if (Test-Path $YuNetPath) {
     }
 }
 
-# ─── STEP 5: Kokoro TTS models ────────────────────────────────────────────────
-Step 5 9 "Checking / downloading Kokoro TTS models..."
+# --- STEP 5: Kokoro TTS models ---
+Step 5 10 "Checking / downloading Kokoro TTS models..."
 
-$KokoroOnnx  = Join-Path $ScriptDir "kokoro-v1.0.onnx"
+$KokoroOnnx   = Join-Path $ScriptDir "kokoro-v1.0.onnx"
 $KokoroVoices = Join-Path $ScriptDir "voices-v1.0.bin"
-$KokoroBase  = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+$KokoroBase   = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 
 $kokoroPassed = $true
 $kokoroDetail = ""
 
 foreach ($item in @(
-    @{ Path = $KokoroOnnx;   Name = "kokoro-v1.0.onnx";   Url = "$KokoroBase/kokoro-v1.0.onnx";   SizeMB = "310 MB" },
-    @{ Path = $KokoroVoices; Name = "voices-v1.0.bin";    Url = "$KokoroBase/voices-v1.0.bin";    SizeMB = "~20 MB" }
+    @{ Path = $KokoroOnnx;   Name = "kokoro-v1.0.onnx";  Url = "$KokoroBase/kokoro-v1.0.onnx";  SizeMB = "310 MB" },
+    @{ Path = $KokoroVoices; Name = "voices-v1.0.bin";   Url = "$KokoroBase/voices-v1.0.bin";   SizeMB = "~27 MB" }
 )) {
     if (Test-Path $item.Path) {
-        Pass "$($item.Name) already exists — skipping"
+        Pass "$($item.Name) already exists -- skipping"
     } else {
-        Write-Host "  Downloading $($item.Name) ($($item.SizeMB)) — please wait..." -ForegroundColor DarkGray
+        Write-Host "  Downloading $($item.Name) ($($item.SizeMB)) -- please wait..." -ForegroundColor DarkGray
         try {
             Invoke-WebRequest -Uri $item.Url -OutFile $item.Path -UseBasicParsing
             if (Test-Path $item.Path) {
@@ -201,24 +199,108 @@ foreach ($item in @(
     }
 }
 
-if ($kokoroPassed) {
-    Record "Kokoro models" $true
-} else {
-    Record "Kokoro models" $false $kokoroDetail
+if ($kokoroPassed) { Record "Kokoro models" $true }
+else               { Record "Kokoro models" $false $kokoroDetail }
+
+# --- STEP 6: Desktop shortcut + icon ---
+Step 6 10 "Creating desktop shortcut..."
+
+$LauncherPath = Join-Path $ScriptDir "start_merlin.ps1"
+$IconPath     = Join-Path $ScriptDir "merlin.ico"
+
+# Ensure launcher script exists (should be in repo, but regenerate if missing)
+if (-not (Test-Path $LauncherPath)) {
+    Set-Content -Path $LauncherPath -Encoding UTF8 -Value @'
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+Set-Location $dir
+& "$dir\venv\Scripts\Activate.ps1"
+python merlin.py
+'@
 }
 
-# ─── STEP 6: LM Studio ────────────────────────────────────────────────────────
-Step 6 9 "Checking LM Studio (localhost:1234)..."
+# Generate wizard-hat icon with .NET GDI+
+try {
+    Add-Type -AssemblyName System.Drawing
 
-$lmRunning = $false
+    $sz  = 256
+    $bmp = New-Object System.Drawing.Bitmap($sz, $sz, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g   = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+
+    # Indigo hat body (triangle)
+    $hatBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(67, 56, 202))
+    $pts = [System.Drawing.Point[]]@(
+        [System.Drawing.Point]::new(128, 10),
+        [System.Drawing.Point]::new(28, 205),
+        [System.Drawing.Point]::new(228, 205)
+    )
+    $g.FillPolygon($hatBrush, $pts)
+
+    # Deep-purple brim (ellipse)
+    $brimBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(88, 28, 135))
+    $g.FillEllipse($brimBrush, 10, 190, 236, 56)
+
+    # Gold star dots
+    $starBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(250, 204, 21))
+    foreach ($star in @(@(94, 85, 20), @(155, 48, 14), @(170, 130, 11), @(70, 150, 9))) {
+        $g.FillEllipse($starBrush, $star[0], $star[1], $star[2], $star[2])
+    }
+
+    $g.Dispose(); $hatBrush.Dispose(); $brimBrush.Dispose(); $starBrush.Dispose()
+
+    # Save PNG into memory, then wrap in ICO container (PNG-in-ICO, Vista+)
+    $ms  = New-Object System.IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $png = $ms.ToArray(); $ms.Dispose()
+
+    $ico = New-Object System.IO.MemoryStream
+    $w   = New-Object System.IO.BinaryWriter($ico)
+    $w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]1)  # ICONDIR
+    $w.Write([byte]0);   $w.Write([byte]0);   $w.Write([byte]0); $w.Write([byte]0)  # 256x256, no palette
+    $w.Write([uint16]1); $w.Write([uint16]32)                      # planes, bit depth
+    $w.Write([uint32]$png.Length); $w.Write([uint32]22)            # data size, offset
+    $w.Write($png); $w.Flush()
+    [System.IO.File]::WriteAllBytes($IconPath, $ico.ToArray())
+    $ico.Dispose(); $w.Dispose()
+
+    Pass "Wizard-hat icon created (merlin.ico)"
+} catch {
+    Warn "Icon creation skipped: $_"
+    $IconPath = $null
+}
+
+# Create Desktop shortcut (.lnk)
+try {
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $lnkPath     = Join-Path $desktopPath "Merlin.lnk"
+    $shell       = New-Object -ComObject WScript.Shell
+    $sc          = $shell.CreateShortcut($lnkPath)
+    $sc.TargetPath       = "powershell.exe"
+    $sc.Arguments        = "-ExecutionPolicy Bypass -NoExit -File `"$LauncherPath`""
+    $sc.WorkingDirectory = $ScriptDir
+    $sc.Description      = "Start Merlin AI companion"
+    if ($IconPath -and (Test-Path $IconPath)) { $sc.IconLocation = "$IconPath,0" }
+    $sc.WindowStyle = 1
+    $sc.Save()
+    Pass "Desktop shortcut created: Merlin.lnk"
+    Record "Desktop shortcut" $true $lnkPath
+} catch {
+    Fail "Could not create shortcut: $_"
+    Record "Desktop shortcut" $false "$_"
+}
+
+# --- STEP 7: LM Studio ---
+Step 7 10 "Checking LM Studio (localhost:1234)..."
+
 try {
     $response = Invoke-WebRequest -Uri "http://localhost:1234/v1/models" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
     if ($response.StatusCode -eq 200) {
-        $body = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $body       = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
         $modelCount = if ($body.data) { $body.data.Count } else { "?" }
-        Pass "LM Studio is running — $modelCount model(s) loaded"
+        Pass "LM Studio is running -- $modelCount model(s) loaded"
         Record "LM Studio" $true "$modelCount model(s)"
-        $lmRunning = $true
     }
 } catch {
     Warn "LM Studio not detected on localhost:1234"
@@ -226,10 +308,8 @@ try {
     Record "LM Studio" $false "Not responding"
 }
 
-# ─── STEP 7: EMEET PIXY camera ───────────────────────────────────────────────
-Step 7 9 "Checking EMEET PIXY camera..."
-
-$cameraFound = $false
+# --- STEP 8: EMEET PIXY camera ---
+Step 8 10 "Checking EMEET PIXY camera..."
 
 if (Test-Path $VenvPython) {
     $camScript = @"
@@ -240,11 +320,6 @@ try:
     for i in range(6):
         cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
         if cap.isOpened():
-            name = "Unknown"
-            try:
-                name = cap.getBackendName()
-            except:
-                pass
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             found.append(f"  index {i}: {w}x{h}")
@@ -268,7 +343,6 @@ except Exception as e:
             Pass "Camera(s) detected:"
             foreach ($line in $lines) { Write-Host "    $line" -ForegroundColor Green }
 
-            # PIXY check — look for multiple cameras or USB device list
             $wmiCams = Get-PnpDevice -Class "Camera" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "OK" }
             $pixyCam = $wmiCams | Where-Object { $_.FriendlyName -match "EMEET|PIXY" }
             if ($pixyCam) {
@@ -277,15 +351,13 @@ except Exception as e:
             } else {
                 Warn "Camera found but EMEET PIXY not specifically identified."
                 Warn "Make sure EMEET PIXY is connected via USB."
-                # Still a soft pass — a camera IS present
                 Record "EMEET PIXY" $true "Camera present (PIXY not specifically identified)"
             }
-            $cameraFound = $true
         } elseif ($camResult -match "NO_CAMERAS") {
             Fail "No cameras detected. Plug in EMEET PIXY via USB."
             Record "EMEET PIXY" $false "No cameras found"
         } elseif ($camResult -match "CV2_NOT_INSTALLED") {
-            Warn "opencv not installed yet — camera check skipped"
+            Warn "opencv not installed yet -- camera check skipped"
             Record "EMEET PIXY" $false "opencv not installed"
         } else {
             Fail "Camera check error: $camResult"
@@ -296,30 +368,29 @@ except Exception as e:
         Record "EMEET PIXY" $false "$_"
     }
 } else {
-    Warn "venv Python not available — camera check skipped"
+    Warn "venv Python not available -- camera check skipped"
     Record "EMEET PIXY" $false "Python venv not ready"
 }
 
-# ─── STEP 8: Audio test ───────────────────────────────────────────────────────
-Step 8 9 "Running audio device test..."
+# --- STEP 9: Audio test ---
+Step 9 10 "Running audio device test..."
 
 if (Test-Path $VenvPython) {
     $audioScript = @"
 import sys
 try:
     import sounddevice as sd
-    devices = sd.query_devices()
-    inputs  = [d for d in devices if d['max_input_channels'] > 0]
-    outputs = [d for d in devices if d['max_output_channels'] > 0]
+    devices    = sd.query_devices()
+    inputs     = [d for d in devices if d['max_input_channels'] > 0]
+    outputs    = [d for d in devices if d['max_output_channels'] > 0]
     default_in  = sd.query_devices(kind='input')
     default_out = sd.query_devices(kind='output')
     print(f"INPUT_DEVICES:{len(inputs)}")
     print(f"OUTPUT_DEVICES:{len(outputs)}")
     print(f"DEFAULT_IN:{default_in['name']}")
     print(f"DEFAULT_OUT:{default_out['name']}")
-    # Brief playback test (440 Hz sine, 0.3s, low volume)
     import numpy as np
-    t = np.linspace(0, 0.3, int(0.3 * 44100), endpoint=False)
+    t    = np.linspace(0, 0.3, int(0.3 * 44100), endpoint=False)
     tone = (0.15 * np.sin(2 * np.pi * 440 * t)).astype('float32')
     sd.play(tone, 44100)
     sd.wait()
@@ -334,13 +405,13 @@ except Exception as e:
         $audioResult = & $VenvPython -c $audioScript 2>&1
 
         if ($audioResult -match "SOUNDDEVICE_NOT_INSTALLED") {
-            Warn "sounddevice not installed — audio test skipped"
+            Warn "sounddevice not installed -- audio test skipped"
             Record "Audio test" $false "sounddevice not installed"
         } elseif ($audioResult -match "AUDIO_ERROR:(.+)") {
             Fail "Audio error: $($Matches[1])"
             Record "Audio test" $false $Matches[1]
         } else {
-            $inLine  = ($audioResult | Select-String "INPUT_DEVICES:(\d+)").Matches[0].Groups[1].Value
+            $inLine = ($audioResult | Select-String "INPUT_DEVICES:(\d+)").Matches[0].Groups[1].Value
             $outLine = ($audioResult | Select-String "OUTPUT_DEVICES:(\d+)").Matches[0].Groups[1].Value
             $defIn   = ($audioResult | Select-String "DEFAULT_IN:(.+)").Matches[0].Groups[1].Value
             $defOut  = ($audioResult | Select-String "DEFAULT_OUT:(.+)").Matches[0].Groups[1].Value
@@ -362,26 +433,25 @@ except Exception as e:
         Record "Audio test" $false "$_"
     }
 } else {
-    Warn "venv Python not available — audio test skipped"
+    Warn "venv Python not available -- audio test skipped"
     Record "Audio test" $false "Python venv not ready"
 }
 
-# ─── STEP 9: Final validation summary ────────────────────────────────────────
-Step 9 9 "Generating summary..."
+# --- STEP 10: Summary ---
+Step 10 10 "Generating summary..."
 
 $passed = 0
 $failed = 0
 
 Banner "Setup Summary"
 foreach ($key in $Results.Keys) {
-    $r = $Results[$key]
+    $r      = $Results[$key]
+    $detail = if ($r.Detail) { " -- $($r.Detail)" } else { "" }
     if ($r.Passed) {
         $passed++
-        $detail = if ($r.Detail) { " — $($r.Detail)" } else { "" }
         Write-Host ("  [PASS] {0,-20}{1}" -f $key, $detail) -ForegroundColor Green
     } else {
         $failed++
-        $detail = if ($r.Detail) { " — $($r.Detail)" } else { "" }
         Write-Host ("  [FAIL] {0,-20}{1}" -f $key, $detail) -ForegroundColor Red
     }
 }
@@ -399,20 +469,19 @@ if ($failed -eq 0) {
 
 Write-Host ""
 Banner "How to start Merlin"
-Write-Host @"
-  1. Make sure LM Studio is running with a model loaded
-     (local server on port 1234 must be enabled)
+Write-Host @'
+  Option A -- double-click "Merlin" on your Desktop
 
-  2. Plug in EMEET PIXY via USB
+  Option B -- PowerShell (manual):
+    .\venv\Scripts\Activate.ps1
+    python merlin.py
 
-  3. Open PowerShell in this folder and run:
+  Make sure LM Studio is running with a model loaded
+  (local server on port 1234 must be enabled).
 
-       .\venv\Scripts\Activate.ps1
-       python merlin.py
-
-  Note: if Activate.ps1 is blocked, run this first:
-       Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-"@ -ForegroundColor White
+  Tip: if Activate.ps1 is blocked, run this first:
+    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+'@ -ForegroundColor White
 
 Write-Host ("=" * 56) -ForegroundColor DarkCyan
 Write-Host ""
