@@ -23,7 +23,11 @@ CHANNELS = 1
 # ============================================================
 # Voice Activity Detection (energy-based)
 # ============================================================
-ENERGY_THRESHOLD = 0.02       # RMS threshold — raise if picking up background noise
+ENERGY_THRESHOLD = 0.07       # RMS silence threshold. Speech onset requires 2x this
+                              # value (0.14 by default) to start recording — speak
+                              # clearly toward the mic from ~1-2 feet away.
+                              # Raise if nearby TV/music causes false triggers.
+                              # Lower (try 0.05) if speech isn't being detected.
 SILENCE_TIMEOUT = 1.5         # Seconds of silence = end of utterance
 MIN_UTTERANCE_LENGTH = 0.5    # Ignore very short sounds
 MAX_UTTERANCE_LENGTH = 15.0   # Force-cut very long speech

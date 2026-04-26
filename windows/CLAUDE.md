@@ -75,6 +75,20 @@ Windows security feature. Disable in System Settings > Privacy & Security > Smar
 Download Git for Windows: https://git-scm.com/download/win
 Check "Add to PATH" during install.
 
+### Merlin hears nothing / never transcribes
+1. Check Windows mic volume: Settings -> System -> Sound -> EMEET Piko -> Input volume = 100%
+2. Run with debug logging to see live RMS values while speaking:
+   ```powershell
+   $env:MERLIN_DEBUG_AUDIO=1; python merlin.py
+   ```
+   Normal speech should show `rms=0.10` or higher. If it stays near 0.000, the mic gain is too low.
+3. If RMS is above 0.05 but Merlin isn't triggering: speech needs to exceed the **onset threshold**
+   which is `ENERGY_THRESHOLD * 2` (default 0.10). Speak a bit louder or lower `ENERGY_THRESHOLD`
+   in config.py (try 0.03). Don't go below 0.02 or ambient noise will trigger false onsets.
+4. Remember: after the face-arrival greeting, the 30s conversation window does NOT start — you must say "merlin" to trigger a response.
+5. Wait ~2 seconds after Merlin finishes speaking before you talk — there's a 1s settle period to
+   let the room echo/AGC die down before the mic re-opens.
+
 ### Sounds are system default, not custom
 Sound files may not be found. Check that `sounds.py` is in the merlin folder. The Windows build uses synthesized tones, not WAV files.
 

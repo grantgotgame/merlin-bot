@@ -54,11 +54,13 @@ class Merlin:
         """Someone sat down at the desk."""
         greeting = self.brain.on_face_arrived()
         if greeting:
-            self.audio.suppress()
-            sounds.greeting()
-            print(f"  Merlin: {greeting}")
-            self.voice.speak(greeting)
-            self.audio.unsuppress()
+            self.audio.suppress(timeout=30.0)
+            try:
+                sounds.greeting()
+                print(f"  Merlin: {greeting}")
+                self.voice.speak(greeting)
+            finally:
+                self.audio.unsuppress()  # always re-enable mic, even if speak() throws
 
     def _on_face_lost(self):
         """Desk is empty. Merlin stays quiet."""
@@ -99,24 +101,28 @@ class Merlin:
                 print(f"  You: {text}")
 
                 # 3. Play listening chime so user knows Merlin heard them
-                self.audio.suppress()
-                sounds.listening()
+                # Timeout: LLM can take up to 30s + TTS time, so give 60s before
+                # the safety net fires.  unsuppress() in finally always clears it sooner.
+                self.audio.suppress(timeout=60.0)
+                try:
+                    sounds.listening()
 
-                # 4. Process through brain (wake word, mute, LLM)
-                response = self.brain.process(text)
-                if response is None:
+                    # 4. Process through brain (wake word, mute, LLM)
+                    response = self.brain.process(text)
+                    if response is None:
+                        continue
+
+                    # 5. Thinking sound while response was generated
+                    sounds.thinking()
+
+                    print(f"  Merlin: {response}")
+
+                    # 6. Speak the response
+                    self.voice.speak(response)
+                    time.sleep(0.3)  # small gap before re-opening mic
+                finally:
+                    # Always re-enable mic — even if LLM times out or speak() throws
                     self.audio.unsuppress()
-                    continue
-
-                # 5. Thinking sound while response was generated
-                sounds.thinking()
-
-                print(f"  Merlin: {response}")
-
-                # 6. Speak the response
-                self.voice.speak(response)
-                time.sleep(0.3)  # small gap before re-opening mic
-                self.audio.unsuppress()
 
         except KeyboardInterrupt:
             pass
