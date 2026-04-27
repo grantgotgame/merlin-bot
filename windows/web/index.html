@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Merlin · The Tower</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/main.css" />
+</head>
+<body data-state="idle">
+  <!-- Animated starfield background -->
+  <div class="starfield" aria-hidden="true">
+    <div class="layer layer-1"></div>
+    <div class="layer layer-2"></div>
+    <div class="layer layer-3"></div>
+  </div>
+
+  <!-- Boot banner: shows until subsystems_ready. Each pill turns green
+       as that subsystem reports ready, red on failure. -->
+  <div id="boot-banner" class="boot-banner" data-testid="boot-banner" hidden>
+    <span class="boot-label">Booting:</span>
+    <span class="boot-pill" data-stage="audio">audio</span>
+    <span class="boot-pill" data-stage="stt">stt</span>
+    <span class="boot-pill" data-stage="voice">voice</span>
+    <span class="boot-pill" data-stage="brain">brain</span>
+    <span class="boot-pill" data-stage="tracker">tracker</span>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="sigil" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none">
+          <circle cx="16" cy="16" r="12" stroke="currentColor" stroke-width="1.2" />
+          <path d="M16 4 L18 14 L28 16 L18 18 L16 28 L14 18 L4 16 L14 14 Z" fill="currentColor" opacity="0.6"/>
+        </svg>
+      </div>
+      <div class="title">
+        <h1>Merlin</h1>
+        <span class="tagline" data-testid="status-text">awake</span>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="icon-btn" id="btn-spellbook" data-testid="btn-spellbook" title="Spellbook (saved prompts)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19.5V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2.5z"/><path d="M8 7h8M8 11h8M8 15h6"/></svg>
+        Spellbook
+      </button>
+      <button class="icon-btn" id="btn-palette" data-testid="btn-palette" title="Command palette (Ctrl+K)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <kbd>⌘K</kbd>
+      </button>
+      <button class="icon-btn" id="btn-settings" data-testid="btn-settings" title="Settings (Ctrl+,)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        Settings
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <!-- Left rail: Conversation -->
+    <section class="rail rail-left card" aria-label="Conversation">
+      <header class="rail-header">
+        <div class="rail-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Conversation
+        </div>
+        <select id="session-picker" data-testid="session-picker" class="select-mini" aria-label="Choose session">
+          <option value="">Current session</option>
+        </select>
+      </header>
+
+      <div class="search-bar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="history-search" data-testid="history-search" type="text" placeholder="Search past conversations…" />
+      </div>
+
+      <div id="transcript" class="transcript" data-testid="transcript">
+        <div class="empty">Say <em>"Hey Merlin"</em> — or type below.</div>
+      </div>
+
+      <form id="say-form" class="say-form" data-testid="say-form">
+        <input id="say-input" data-testid="say-input" type="text" placeholder="Type to Merlin…" autocomplete="off" />
+        <button type="submit" class="ghost-btn" title="Send (Enter)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 12 14-7-4 14-2-7-8-0z"/></svg>
+        </button>
+      </form>
+    </section>
+
+    <!-- Center: The Orb -->
+    <section class="stage">
+      <canvas id="orb" data-testid="orb" aria-label="Merlin's orb" tabindex="0"></canvas>
+      <div class="orb-meta">
+        <div class="state-pill" data-testid="state-pill">idle</div>
+        <div class="hint">click to mute · hold <kbd>space</kbd> to push-to-talk</div>
+      </div>
+    </section>
+
+    <!-- Right rail: Status & Spellbook -->
+    <aside class="rail rail-right card" aria-label="Status">
+      <header class="rail-header">
+        <div class="rail-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          Live
+        </div>
+        <div class="uptime" data-testid="uptime">—</div>
+      </header>
+
+      <div class="status-grid" id="status-modules" data-testid="status-modules"></div>
+
+      <div class="vu" aria-label="Microphone level">
+        <div class="vu-label">microphone</div>
+        <canvas id="vu" data-testid="vu"></canvas>
+      </div>
+
+      <div class="cam" aria-label="Camera preview">
+        <div class="cam-label">camera</div>
+        <img id="cam" data-testid="cam-preview" alt="" />
+      </div>
+
+      <div class="latency">
+        <div class="lbl">latency</div>
+        <div class="row"><span>stt</span><b data-testid="latency-stt">—</b></div>
+        <div class="row"><span>llm</span><b data-testid="latency-llm">—</b></div>
+        <div class="row"><span>tts</span><b data-testid="latency-tts">—</b></div>
+      </div>
+
+      <div class="spellbook-mini">
+        <div class="lbl">spellbook</div>
+        <div class="chips" id="spellbook-chips" data-testid="spellbook-chips"></div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Settings drawer -->
+  <aside id="drawer" class="drawer" aria-hidden="true" role="dialog" aria-label="Settings">
+    <div class="drawer-head">
+      <h2>Settings</h2>
+      <button class="icon-btn" id="drawer-close" data-testid="drawer-close" aria-label="Close settings">×</button>
+    </div>
+    <nav class="drawer-tabs" role="tablist">
+      <button class="tab active" data-tab="hearing" data-testid="tab-hearing">Hearing</button>
+      <button class="tab" data-tab="voice" data-testid="tab-voice">Voice</button>
+      <button class="tab" data-tab="sight" data-testid="tab-sight">Sight</button>
+      <button class="tab" data-tab="mind" data-testid="tab-mind">Mind</button>
+      <button class="tab" data-tab="appearance" data-testid="tab-appearance">Appearance</button>
+    </nav>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+  <div id="drawer-scrim" class="scrim"></div>
+
+  <!-- Command palette -->
+  <div id="palette" class="palette" aria-hidden="true" role="dialog" aria-label="Command palette">
+    <div class="palette-card card">
+      <input id="palette-input" data-testid="palette-input" type="text" placeholder="Cast a command…" />
+      <ul id="palette-list" data-testid="palette-list" role="listbox"></ul>
+    </div>
+  </div>
+
+  <!-- Spellbook drawer -->
+  <aside id="spellbook" class="drawer drawer-narrow" aria-hidden="true" role="dialog" aria-label="Spellbook">
+    <div class="drawer-head">
+      <h2>Spellbook</h2>
+      <button class="icon-btn" id="spellbook-close" data-testid="spellbook-close" aria-label="Close spellbook">×</button>
+    </div>
+    <div class="drawer-body">
+      <p class="muted">Saved prompts that send straight to Merlin.</p>
+      <ul id="spell-list" data-testid="spell-list" class="spell-list"></ul>
+      <form id="spell-form" class="spell-form">
+        <input id="spell-text" data-testid="spell-text" type="text" placeholder="New incantation…" />
+        <button class="ghost-btn">Add</button>
+      </form>
+    </div>
+  </aside>
+
+  <!-- Hidden audio element for voice previews -->
+  <audio id="preview-audio"></audio>
+
+  <script type="module" src="/static/main.js"></script>
+</body>
+</html>

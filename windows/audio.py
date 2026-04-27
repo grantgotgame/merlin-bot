@@ -22,11 +22,8 @@ import numpy as np
 import threading
 import queue
 import time
-from config import (
-    PIXY_MIC_DEVICE, SAMPLE_RATE, CHANNELS,
-    ENERGY_THRESHOLD, SILENCE_TIMEOUT,
-    MIN_UTTERANCE_LENGTH, MAX_UTTERANCE_LENGTH,
-)
+import config
+from config import PIXY_MIC_DEVICE, SAMPLE_RATE, CHANNELS
 
 _MIC_CHECK_WINDOW = 10.0   # seconds before warning about no speech detected
 _NO_FRAMES_TIMEOUT = 5.0   # seconds before watchdog fires
@@ -74,7 +71,9 @@ def _check_windows_mic_privacy():
 
 
 class AudioPipeline:
-    def __init__(self):
+    def __init__(self, bus=None):
+        self.bus = bus
+
         # Warn immediately if Windows is blocking mic access for desktop apps.
         allowed = _check_windows_mic_privacy()
         if allowed is False:
@@ -100,6 +99,8 @@ class AudioPipeline:
         self._peak_rms = 0.0
         self._mic_check_done = False
         self._utterances_queued = 0
+        self._last_rms_emit = 0.0  # throttle rms broadcasts to ~10 Hz
+        self._was_loud = False     # for vad_start / vad_end edge detection
 
         # Open AND start the InputStream immediately on the main thread.
         # WASAPI requires COM STA context; __init__ always runs on the main
@@ -267,10 +268,33 @@ class AudioPipeline:
     # Audio processing
     # ------------------------------------------------------------------
 
+    def _emit(self, event, **kwargs):
+        if self.bus is not None:
+            try:
+                self.bus.emit(event, **kwargs)
+            except Exception:
+                pass
+
     def _process_frame(self, indata, frames):
         """Diagnostics, suppression gate, hysteresis VAD."""
         audio = indata[:, 0].copy()
         rms = float(np.sqrt(np.mean(audio ** 2)))
+
+        # Read hot-applicable thresholds dynamically from config so the
+        # web UI can adjust them without a restart.
+        energy_thr = config.ENERGY_THRESHOLD
+        silence_to = config.SILENCE_TIMEOUT
+        min_utt = config.MIN_UTTERANCE_LENGTH
+        max_utt = config.MAX_UTTERANCE_LENGTH
+
+        # Throttled RMS broadcast for the live VU meter (~10 Hz)
+        now = time.time()
+        if now - self._last_rms_emit > 0.1:
+            self._last_rms_emit = now
+            self._emit("audio_rms", rms=rms,
+                       threshold=energy_thr,
+                       onset=energy_thr * _ONSET_MULTIPLIER,
+                       suppressed=self._suppressed.is_set())
 
         if os.environ.get("MERLIN_DEBUG_AUDIO"):
             print(f"[audio] rms={rms:.4f}", end="\r")
@@ -282,7 +306,7 @@ class AudioPipeline:
             if elapsed >= _MIC_CHECK_WINDOW:
                 self._mic_check_done = True
                 if self._utterances_queued == 0:
-                    onset_thr = ENERGY_THRESHOLD * _ONSET_MULTIPLIER
+                    onset_thr = energy_thr * _ONSET_MULTIPLIER
                     print(
                         f"\n[audio] (!) No speech detected in {_MIC_CHECK_WINDOW:.0f}s "
                         f"(frames={self._frames_read}, peak_rms={self._peak_rms:.4f}, "
@@ -323,7 +347,7 @@ class AudioPipeline:
         # Using two thresholds prevents brief noise bursts from resetting
         # silence detection without using a slow EMA that adds latency.
 
-        onset_threshold = ENERGY_THRESHOLD * _ONSET_MULTIPLIER
+        onset_threshold = energy_thr * _ONSET_MULTIPLIER
 
         if rms > onset_threshold:
             # Loud onset
@@ -331,9 +355,10 @@ class AudioPipeline:
                 self._accumulating = True
                 self._buffer = []
                 self._silence_start = None
+                self._emit("vad_start", rms=rms)
             self._buffer.append(audio)
 
-        elif self._accumulating and rms > ENERGY_THRESHOLD:
+        elif self._accumulating and rms > energy_thr:
             # Neutral zone — just buffer, don't touch silence timer
             self._buffer.append(audio)
 
@@ -342,13 +367,13 @@ class AudioPipeline:
             self._buffer.append(audio)
             if self._silence_start is None:
                 self._silence_start = time.time()
-            elif time.time() - self._silence_start > SILENCE_TIMEOUT:
+            elif time.time() - self._silence_start > silence_to:
                 self._emit_utterance()
 
         # Force-cut very long utterances
         if self._accumulating and self._buffer:
             duration = len(self._buffer) * frames / self._mic_rate
-            if duration >= MAX_UTTERANCE_LENGTH:
+            if duration >= max_utt:
                 self._emit_utterance()
 
     def _emit_utterance(self):
@@ -357,9 +382,10 @@ class AudioPipeline:
             raw = np.concatenate(self._buffer)
             utterance = _resample(raw, self._mic_rate, SAMPLE_RATE)
             duration = len(utterance) / SAMPLE_RATE
-            if duration >= MIN_UTTERANCE_LENGTH:
+            if duration >= config.MIN_UTTERANCE_LENGTH:
                 self.speech_queue.put(utterance)
                 self._utterances_queued += 1
+                self._emit("vad_end", duration=duration)
         self._buffer = []
         self._accumulating = False
         self._silence_start = None
@@ -398,6 +424,7 @@ class AudioPipeline:
         self._suppress_deadline = time.time() + timeout
         self._suppress_safety = True   # flag: log if this timeout fires naturally
         self._suppressed.set()
+        self._emit("mic_suppressed", timeout=timeout)
 
     def unsuppress(self, settle=1.0):
         """
@@ -418,3 +445,4 @@ class AudioPipeline:
         else:
             self._suppress_safety = False
             self._suppressed.clear()
+        self._emit("mic_unsuppressed", settle=settle)

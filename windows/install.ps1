@@ -214,14 +214,40 @@ $LauncherPath = Join-Path $ScriptDir "start_merlin.ps1"
 $IconPath     = Join-Path $ScriptDir "merlin.ico"
 
 # Ensure launcher script exists (should be in repo, but regenerate if missing)
-if (-not (Test-Path $LauncherPath)) {
-    Set-Content -Path $LauncherPath -Encoding UTF8 -Value @'
+# Always overwrite the launcher so updates ship reliably (previously this
+# was only created if missing — which left users on stale versions).
+Set-Content -Path $LauncherPath -Encoding UTF8 -Value @'
+# Launches Merlin and opens "The Tower" web UI.
+# Activates the local venv, ensures the web deps are present, then runs merlin.py.
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $dir
-& "$dir\venv\Scripts\Activate.ps1"
-python merlin.py
-'@
+
+$venv = Join-Path $dir "venv"
+$venvPython = Join-Path $venv "Scripts\python.exe"
+$venvPip    = Join-Path $venv "Scripts\pip.exe"
+$activate   = Join-Path $venv "Scripts\Activate.ps1"
+
+if (-not (Test-Path $venvPython)) {
+    Write-Host "  No venv found at $venv -- creating..." -ForegroundColor Yellow
+    python -m venv $venv
 }
+
+if (Test-Path $activate) { & $activate }
+
+# Self-heal: if the web deps somehow vanished, install them silently before boot.
+$probe = & $venvPython -c "import fastapi, uvicorn" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Installing missing web dependencies (fastapi, uvicorn)..." -ForegroundColor Yellow
+    & $venvPip install fastapi "uvicorn[standard]" --quiet
+}
+
+Write-Host ""
+Write-Host "  Starting Merlin..." -ForegroundColor Cyan
+Write-Host "  The Tower will open at http://localhost:8800" -ForegroundColor DarkGray
+Write-Host ""
+
+& $venvPython merlin.py
+'@
 
 # Generate wizard-hat icon with .NET GDI+
 try {
@@ -285,7 +311,7 @@ try {
     $sc.TargetPath       = "powershell.exe"
     $sc.Arguments        = "-ExecutionPolicy Bypass -NoExit -File `"$LauncherPath`""
     $sc.WorkingDirectory = $ScriptDir
-    $sc.Description      = "Start Merlin AI companion"
+    $sc.Description      = "Start Merlin AI companion (opens The Tower at http://localhost:8800)"
     if ($IconPath -and (Test-Path $IconPath)) { $sc.IconLocation = "$IconPath,0" }
     $sc.WindowStyle = 1
     $sc.Save()
@@ -484,6 +510,13 @@ Write-Host @'
   Option B -- PowerShell (manual):
     .\venv\Scripts\Activate.ps1
     python merlin.py
+
+  When Merlin starts, it opens "The Tower" web UI at:
+    http://localhost:8800
+  (Your default browser should open automatically. Subsystems
+  still load after the page appears — watch the chat rail.)
+
+  Run `python merlin.py --no-web` if you prefer the old terminal-only mode.
 
   Make sure LM Studio is running with a model loaded
   (local server on port 1234 must be enabled).

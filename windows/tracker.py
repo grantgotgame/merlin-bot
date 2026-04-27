@@ -21,10 +21,16 @@ YUNET_URL = (
 
 
 class FaceTracker:
-    def __init__(self):
+    def __init__(self, bus=None):
+        self.bus = bus
         self._running = False
         self._face_present = False
         self._face_lost_time = None
+
+        # JPEG of the most recent frame (for MJPEG endpoint)
+        self.latest_jpeg: bytes | None = None
+        self._last_jpeg_t = 0.0
+        self._last_box_emit = 0.0
 
         # Callbacks — set by merlin.py
         self.on_face_arrived = None
@@ -179,10 +185,35 @@ class FaceTracker:
     # Main loop — run this in a daemon thread
     # ------------------------------------------------------------------
 
+    def _emit(self, event, **kwargs):
+        if self.bus is not None:
+            try:
+                self.bus.emit(event, **kwargs)
+            except Exception:
+                pass
+
+    def _maybe_publish_jpeg(self, frame, face_box=None):
+        """Encode the current frame to JPEG ~15 fps for the MJPEG stream."""
+        now = time.time()
+        if now - self._last_jpeg_t < 0.066:
+            return
+        self._last_jpeg_t = now
+        try:
+            annotated = frame
+            if face_box is not None:
+                fx, fy, fw, fh = face_box
+                annotated = frame.copy()
+                cv2.rectangle(annotated, (fx, fy), (fx + fw, fy + fh), (80, 220, 120), 2)
+            ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok:
+                self.latest_jpeg = bytes(buf)
+        except Exception:
+            pass
+
     def run(self):
         """Continuous face tracking loop."""
         self._running = True
-        face_lost_timeout = 8.0  # seconds before declaring face gone
+        face_lost_timeout = 8.0
         print("[tracker] Face tracking active.")
 
         while self._running:
@@ -196,6 +227,7 @@ class FaceTracker:
                 continue
 
             if self.detector is None:
+                self._maybe_publish_jpeg(frame)
                 time.sleep(1)
                 continue
 
@@ -203,17 +235,28 @@ class FaceTracker:
             self.detector.setInputSize((w, h))
             _, faces = self.detector.detect(frame)
 
+            face_box = None
             if faces is not None and len(faces) > 0:
-                # Pick the most confident face
                 best = max(faces, key=lambda f: f[-1])
                 fx, fy, fw, fh = int(best[0]), int(best[1]), int(best[2]), int(best[3])
+                conf = float(best[-1])
                 cx, cy = fx + fw // 2, fy + fh // 2
+                face_box = (fx, fy, fw, fh)
 
                 self._move_ptz(cx, cy, w, h)
+
+                # Throttle face_box emissions to ~5 Hz
+                now = time.time()
+                if now - self._last_box_emit > 0.2:
+                    self._last_box_emit = now
+                    self._emit("face_box",
+                               x=fx, y=fy, w=fw, h=fh,
+                               frame_w=w, frame_h=h, conf=conf)
 
                 if not self._face_present:
                     self._face_present = True
                     self._face_lost_time = None
+                    self._emit("face_arrived")
                     if self.on_face_arrived:
                         self.on_face_arrived()
             else:
@@ -223,9 +266,11 @@ class FaceTracker:
                     elif time.time() - self._face_lost_time > face_lost_timeout:
                         self._face_present = False
                         self._face_lost_time = None
+                        self._emit("face_lost")
                         if self.on_face_lost:
                             self.on_face_lost()
 
+            self._maybe_publish_jpeg(frame, face_box)
             time.sleep(1.0 / CAMERA_FPS)
 
     def stop(self):

@@ -6,3 +6,5 @@ soundfile
 faster-whisper>=1.0.0
 kokoro-onnx
 onnxruntime-gpu
+fastapi>=0.110
+uvicorn[standard]>=0.27

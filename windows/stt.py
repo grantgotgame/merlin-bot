@@ -24,12 +24,21 @@ def _register_nvidia_dll_dirs():
       1. os.add_dll_directory  — for extensions that use LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
       2. prepend to PATH       — for ctranslate2's internal LoadLibrary calls, which use
                                  the standard search order (application dir -> PATH -> System32)
+    Searches both system site-packages and the user site-packages, since pip
+    falls back to --user installation when the system dir isn't writable.
     Safe to call multiple times; duplicate PATH entries are skipped.
     """
     if sys.platform != "win32":
         return
+    search_roots = list(site.getsitepackages())
+    try:
+        user_site = site.getusersitepackages()
+        if user_site and user_site not in search_roots:
+            search_roots.append(user_site)
+    except Exception:
+        pass
     found = []
-    for sp in site.getsitepackages():
+    for sp in search_roots:
         nvidia_root = os.path.join(sp, "nvidia")
         if not os.path.isdir(nvidia_root):
             continue
@@ -96,7 +105,8 @@ def _load_whisper(device, compute_type):
 
 
 class STT:
-    def __init__(self):
+    def __init__(self, bus=None):
+        self.bus = bus
         print(f"[stt] Loading Whisper '{WHISPER_MODEL}' on {WHISPER_DEVICE}...")
         self._on_cpu = (WHISPER_DEVICE == "cpu")
 
@@ -117,17 +127,39 @@ class STT:
 
         print(f"[stt] Whisper loaded ({'CPU' if self._on_cpu else 'GPU'}).")
 
+    def _bounded_inference(self, audio, timeout=30):
+        """Run inference on a daemon thread with a hard timeout. ctranslate2's
+        LoadLibrary path can hang silently if a CUDA DLL is wedged; we don't
+        want that to block the whole boot."""
+        result_box, err_box = [None], [None]
+
+        def _go():
+            try:
+                result_box[0] = self._run_inference(audio)
+            except Exception as e:
+                err_box[0] = e
+
+        t = threading.Thread(target=_go, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            raise TimeoutError(f"GPU inference timed out after {timeout}s")
+        if err_box[0]:
+            raise err_box[0]
+        return result_box[0]
+
     def _smoke_test(self):
-        """Force a real GPU inference at boot; auto-install and retry if it fails."""
+        """Force a real GPU inference at boot; auto-install and retry if it fails.
+        Bounded by a timeout so a wedged DLL load can't hang Merlin forever."""
         try:
-            self._run_inference(np.zeros(1600, dtype=np.float32))
+            self._bounded_inference(np.zeros(1600, dtype=np.float32), timeout=30)
         except Exception as e:
             print(f"[stt] GPU smoke test failed: {e}")
             if _is_missing_lib_error(e) and self._auto_install_cuda():
                 print("[stt] Reloading model on GPU...")
                 try:
                     self.model = _load_whisper(WHISPER_DEVICE, WHISPER_COMPUTE)
-                    self._run_inference(np.zeros(1600, dtype=np.float32))
+                    self._bounded_inference(np.zeros(1600, dtype=np.float32), timeout=30)
                     print("[stt] GPU working.")
                     return
                 except Exception as e2:
@@ -172,15 +204,27 @@ class STT:
         )
         return list(segments)
 
+    def _emit(self, event, **kwargs):
+        if self.bus is not None:
+            try:
+                self.bus.emit(event, **kwargs)
+            except Exception:
+                pass
+
     def transcribe(self, audio):
         """
         Transcribe a numpy float32 audio array to text.
         Returns the transcribed string, or None if nothing recognised.
         """
+        import time as _t
+        self._emit("stt_start")
+        t0 = _t.time()
         try:
             segments = self._run_inference(audio)
             text = " ".join(s.text for s in segments).strip()
-            return text if text else None
+            text = text if text else None
+            self._emit("stt_complete", text=text or "", latency_ms=int((_t.time() - t0) * 1000))
+            return text
         except Exception as e:
             # Belt-and-suspenders: if a GPU error slips through after boot
             # (e.g. driver reset), fall back to CPU and retry once.
