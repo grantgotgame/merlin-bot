@@ -48,3 +48,4 @@ windows/venv/
 windows/*.onnx
 windows/merlin.ico
 /.claude
+*.db*
