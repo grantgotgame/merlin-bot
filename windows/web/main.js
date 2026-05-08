@@ -292,12 +292,20 @@ function renderStatus() {
     if (!m) continue;
     const cell = document.createElement('div');
     let ok = m.alive !== false && (m.alive !== undefined);
-    if (name === 'brain' && m.llm && m.llm.severity && m.llm.severity !== 'ok') ok = false;
+    // Promote brain.llm and audio/stt.hearing severity onto the pill colour.
+    let extra = null;
+    if (name === 'brain' && m.llm && m.llm.severity && m.llm.severity !== 'ok') {
+      ok = false;
+      extra = m.llm;
+    } else if ((name === 'audio' || name === 'stt') && m.hearing && m.hearing.severity && m.hearing.severity !== 'ok') {
+      ok = false;
+      extra = m.hearing;
+    }
     cell.className = `status-mod ${ok ? 'ok' : 'bad'}`;
     cell.dataset.testid = `status-${name}`;
     const summary = moduleSummary(name, m);
-    const detail = (name === 'brain' && m.llm && m.llm.severity !== 'ok')
-      ? `<div class="val warn">${escapeHTML(m.llm.message)}${m.llm.action ? ' — ' + escapeHTML(m.llm.action) : ''}</div>`
+    const detail = extra
+      ? `<div class="val warn">${escapeHTML(extra.message)}${extra.action ? ' — ' + escapeHTML(extra.action) : ''}</div>`
       : '';
     cell.innerHTML = `
       <div class="name"><span class="pip"></span>${name}</div>

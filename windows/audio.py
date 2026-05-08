@@ -101,6 +101,12 @@ class AudioPipeline:
         self._utterances_queued = 0
         self._last_rms_emit = 0.0  # throttle rms broadcasts to ~10 Hz
         self._was_loud = False     # for vad_start / vad_end edge detection
+        # Rolling RMS history for the audio-health watcher.
+        # Sampled at ~10Hz (every 0.1s). Window = ~30s.
+        from collections import deque
+        self._rms_history: deque = deque(maxlen=300)
+        self._clip_count = 0       # frames with peak amplitude >= 0.99
+        self._sample_count = 0     # total frames sampled (for rates)
 
         # Open AND start the InputStream immediately on the main thread.
         # WASAPI requires COM STA context; __init__ always runs on the main
@@ -295,6 +301,15 @@ class AudioPipeline:
                        threshold=energy_thr,
                        onset=energy_thr * _ONSET_MULTIPLIER,
                        suppressed=self._suppressed.is_set())
+            # Feed the audio-health watcher only when not suppressed (TTS
+            # echo would otherwise corrupt the noise-floor estimate).
+            if not self._suppressed.is_set():
+                self._rms_history.append(rms)
+                self._sample_count += 1
+                # Detect clipping: peak amplitude >= 0.99 means the input
+                # is hitting the digital ceiling.
+                if float(np.max(np.abs(audio))) >= 0.99:
+                    self._clip_count += 1
 
         if os.environ.get("MERLIN_DEBUG_AUDIO"):
             print(f"[audio] rms={rms:.4f}", end="\r")

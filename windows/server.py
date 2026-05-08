@@ -539,18 +539,30 @@ def create_app(comps: Components, hub: WSHub) -> FastAPI:
 def _health_payload(comps: Components) -> dict:
     uptime = time.time() - comps.started_at
     modules = {}
+    # Audio + STT health share a diagnostic so we can point at the right fix
+    # (mic clipping vs Whisper confidence vs noise floor). Computed once and
+    # split across both pills since the user-facing message often spans both.
+    hearing = None
+    if comps.audio is not None and comps.stt is not None:
+        try:
+            from merlin_health import check_audio
+            hearing = check_audio(comps.audio, comps.stt)
+        except Exception as e:
+            hearing = {"ok": True, "severity": "ok", "message": f"health check error: {e}", "action": None}
     if comps.audio is not None:
         modules["audio"] = {
             "alive": getattr(comps.audio, "_running", False),
             "device": getattr(comps.audio, "mic_device", None),
             "api": getattr(comps.audio, "_api_name", None),
             "rate": getattr(comps.audio, "_mic_rate", None),
+            "hearing": hearing,
         }
     if comps.stt is not None:
         modules["stt"] = {
             "alive": True,
             "on_cpu": getattr(comps.stt, "_on_cpu", None),
             "model": comps.settings.get("WHISPER_MODEL"),
+            "hearing": hearing,
         }
     if comps.voice is not None:
         modules["voice"] = {

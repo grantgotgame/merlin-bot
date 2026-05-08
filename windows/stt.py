@@ -107,6 +107,11 @@ def _load_whisper(device, compute_type):
 class STT:
     def __init__(self, bus=None):
         self.bus = bus
+        # Rolling window of recent transcript quality. Each entry:
+        # {avg_logprob, no_speech_prob, duration, text_len, t}.
+        # merlin_health.check_audio() reads this to diagnose mishearing.
+        from collections import deque
+        self._recent_quality: deque = deque(maxlen=8)
         print(f"[stt] Loading Whisper '{WHISPER_MODEL}' on {WHISPER_DEVICE}...")
         self._on_cpu = (WHISPER_DEVICE == "cpu")
 
@@ -223,7 +228,51 @@ class STT:
             segments = self._run_inference(audio)
             text = " ".join(s.text for s in segments).strip()
             text = text if text else None
-            self._emit("stt_complete", text=text or "", latency_ms=int((_t.time() - t0) * 1000))
+            # Capture per-segment confidence from faster-whisper for the
+            # audio-health watcher. avg_logprob: -0 is perfect, < -1.0 is
+            # rough; no_speech_prob > 0.5 means Whisper thinks the audio
+            # wasn't speech at all (hallucination risk).
+            if segments:
+                avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
+                no_speech_prob = max(s.no_speech_prob for s in segments)
+                duration = sum((s.end - s.start) for s in segments)
+            else:
+                avg_logprob = 0.0
+                no_speech_prob = 1.0
+                duration = 0.0
+            self._recent_quality.append({
+                "avg_logprob": avg_logprob,
+                "no_speech_prob": no_speech_prob,
+                "duration": duration,
+                "text_len": len(text or ""),
+                "t": _t.time(),
+            })
+            # Drop hallucinations: when Whisper itself says the audio probably
+            # wasn't speech (no_speech_prob > 0.85) AND its confidence in the
+            # transcript is low (avg_logprob < -0.7), the "transcript" is
+            # almost always background noise hallucinated as words. Returning
+            # None here keeps these out of the conversation and away from the
+            # brain. The rolling-quality deque still records the attempt, so
+            # the audio-health watcher can flag the underlying cause.
+            if text and no_speech_prob > 0.85 and avg_logprob < -0.7:
+                print(f"[stt] Dropping likely hallucination "
+                      f"(no_speech={no_speech_prob:.2f}, logprob={avg_logprob:.2f}): {text!r}")
+                self._emit(
+                    "stt_complete",
+                    text="",
+                    latency_ms=int((_t.time() - t0) * 1000),
+                    avg_logprob=avg_logprob,
+                    no_speech_prob=no_speech_prob,
+                    dropped="hallucination",
+                )
+                return None
+            self._emit(
+                "stt_complete",
+                text=text or "",
+                latency_ms=int((_t.time() - t0) * 1000),
+                avg_logprob=avg_logprob,
+                no_speech_prob=no_speech_prob,
+            )
             return text
         except Exception as e:
             # Belt-and-suspenders: if a GPU error slips through after boot

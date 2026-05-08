@@ -196,3 +196,125 @@ def llm_base_url(llm_url: str) -> str:
         if llm_url.endswith(suffix):
             return llm_url[: -len(suffix)]
     return llm_url
+
+
+# ── Audio + STT self-diagnosis ───────────────────────────────────────
+#
+# Wizard principle: when Merlin can't hear well he notices and tells the
+# Hero what to fix, instead of silently mishearing forever. These thresholds
+# are tuned for the EMEET PIXY at 1-2 ft away. Adjust if hardware changes.
+
+_CLIP_RATE_BAD = 0.02        # >2% of frames clipping → input gain too high
+_NOISE_FLOOR_HIGH = 0.04     # noise floor near onset threshold (0.05 default) → false triggers
+_PEAK_LOW = 0.05             # never exceeded onset threshold → mic too quiet
+_LOGPROB_BAD = -1.0          # avg over recent utterances; -1.0 ≈ very unsure
+_NO_SPEECH_BAD = 0.6         # Whisper thinks audio wasn't speech
+_RECENT_UTTERANCES_FOR_AVG = 5
+
+
+def _audio_signals(audio_module: Any) -> dict[str, Any]:
+    """Snapshot audio.py's runtime metrics into plain numbers."""
+    history = list(getattr(audio_module, "_rms_history", []) or [])
+    clip_count = int(getattr(audio_module, "_clip_count", 0))
+    sample_count = int(getattr(audio_module, "_sample_count", 0)) or 1
+    if history:
+        peak = max(history)
+        # Noise floor: median of the lowest quartile (robust to occasional speech bursts).
+        sorted_h = sorted(history)
+        q1 = sorted_h[: max(1, len(sorted_h) // 4)]
+        noise_floor = sum(q1) / len(q1)
+    else:
+        peak = 0.0
+        noise_floor = 0.0
+    return {
+        "samples": len(history),
+        "peak_rms": float(peak),
+        "noise_floor": float(noise_floor),
+        "clip_rate": clip_count / sample_count,
+    }
+
+
+def _stt_signals(stt_module: Any) -> dict[str, Any]:
+    """Snapshot recent Whisper confidence into a single dict."""
+    recent = list(getattr(stt_module, "_recent_quality", []) or [])
+    recent = recent[-_RECENT_UTTERANCES_FOR_AVG:]
+    if not recent:
+        return {"samples": 0, "avg_logprob": 0.0, "max_no_speech": 0.0}
+    avg_logprob = sum(r["avg_logprob"] for r in recent) / len(recent)
+    max_no_speech = max(r["no_speech_prob"] for r in recent)
+    return {
+        "samples": len(recent),
+        "avg_logprob": float(avg_logprob),
+        "max_no_speech": float(max_no_speech),
+    }
+
+
+def check_audio(audio_module: Any, stt_module: Any) -> dict[str, Any]:
+    """Diagnose hearing problems. Returns one health dict per concern, or
+    ok if everything looks fine. Severity tiers match check_llm:
+      ok    — no action needed
+      warn  — degraded, the Hero should know
+      error — Merlin probably can't hear at all
+    """
+    a = _audio_signals(audio_module) if audio_module else {"samples": 0}
+    s = _stt_signals(stt_module) if stt_module else {"samples": 0}
+
+    # Need a few seconds of data before any check is meaningful.
+    if a.get("samples", 0) < 30:
+        return {
+            "ok": True, "severity": "ok",
+            "message": "Calibrating mic…", "action": None,
+            "metrics": {"audio": a, "stt": s},
+        }
+
+    # 1. Clipping is the worst — Whisper can't recover from clipped input.
+    if a["clip_rate"] > _CLIP_RATE_BAD:
+        return {
+            "ok": False, "severity": "error",
+            "message": f"Mic is clipping ({a['clip_rate']:.0%} of frames at digital ceiling).",
+            "action": "Lower input volume in Windows Sound Settings → EMEET Piko → Properties → Levels.",
+            "metrics": {"audio": a, "stt": s},
+        }
+
+    # 2. Mic essentially silent — speech never crossed onset threshold.
+    if a["peak_rms"] < _PEAK_LOW:
+        return {
+            "ok": False, "severity": "error",
+            "message": f"Mic input is silent (peak RMS {a['peak_rms']:.3f} over {a['samples']/10:.0f}s).",
+            "action": "Check the mic isn't muted; raise Input Volume to 100% in Windows Sound Settings.",
+            "metrics": {"audio": a, "stt": s},
+        }
+
+    # 3. Noise floor near onset threshold — false triggers will dominate.
+    if a["noise_floor"] > _NOISE_FLOOR_HIGH:
+        return {
+            "ok": False, "severity": "warn",
+            "message": f"Background noise is high (floor {a['noise_floor']:.3f}). Whisper may transcribe ambient sounds.",
+            "action": "Quiet the room, or raise ENERGY_THRESHOLD in config.py.",
+            "metrics": {"audio": a, "stt": s},
+        }
+
+    # 4. Whisper is unsure — audio is unclear even though levels look fine.
+    if s["samples"] >= 3 and s["avg_logprob"] < _LOGPROB_BAD:
+        return {
+            "ok": False, "severity": "warn",
+            "message": f"Having trouble hearing — Whisper confidence is low (avg_logprob {s['avg_logprob']:.2f}).",
+            "action": "Speak closer to the mic, or check for echo / room reverb.",
+            "metrics": {"audio": a, "stt": s},
+        }
+
+    # 5. Whisper thinks recent audio isn't speech at all (hallucination risk).
+    if s["samples"] >= 3 and s["max_no_speech"] > _NO_SPEECH_BAD:
+        return {
+            "ok": False, "severity": "warn",
+            "message": f"Recent audio doesn't sound like speech (no_speech_prob {s['max_no_speech']:.2f}).",
+            "action": "If Merlin's transcript is hallucinating, raise ENERGY_THRESHOLD in config.py.",
+            "metrics": {"audio": a, "stt": s},
+        }
+
+    return {
+        "ok": True, "severity": "ok",
+        "message": f"Hearing well (peak {a['peak_rms']:.2f}, floor {a['noise_floor']:.3f}).",
+        "action": None,
+        "metrics": {"audio": a, "stt": s},
+    }
