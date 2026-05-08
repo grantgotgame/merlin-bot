@@ -87,7 +87,7 @@ Merlin's personality is a blend of three:
 
 ---
 
-## Sentence Completion Stems (for Merlin to ask Ezra)
+## Sentence Completion Stems (for Merlin to ask the Hero)
 
 These are Branden's actual stems, adapted as Merlin questions:
 

@@ -8,8 +8,13 @@ import os
 # ============================================================
 # LM Studio (runs on your laptop)
 # ============================================================
-LLM_URL = "http://localhost:1234/v1/chat/completions"
-LLM_MODEL = "local-model"
+LLM_URL = os.getenv("MERLIN_LLM_URL", "http://localhost:1234/v1/chat/completions")
+# meta-llama-3.1-8b is non-reasoning and predictable. Gemma 4 (E4B/26B) is
+# a reasoning model that frequently consumes its entire token budget on
+# hidden reasoning_content and returns empty replies — fine for one-shot
+# questions, terrible for an ambient companion. Switch back to Gemma when
+# the merlin-gemma4-lora.gguf adapter is recovered (see training/).
+LLM_MODEL = os.getenv("MERLIN_MODEL", "meta-llama-3.1-8b-instruct")
 
 # ============================================================
 # Audio Devices

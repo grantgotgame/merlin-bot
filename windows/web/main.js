@@ -18,6 +18,8 @@ const state = {
 };
 
 const $ = (sel) => document.querySelector(sel);
+
+const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const orb = new Orb($('#orb'));
@@ -289,12 +291,18 @@ function renderStatus() {
     const m = h.modules?.[name];
     if (!m) continue;
     const cell = document.createElement('div');
-    const ok = m.alive !== false && (m.alive !== undefined);
+    let ok = m.alive !== false && (m.alive !== undefined);
+    if (name === 'brain' && m.llm && m.llm.severity && m.llm.severity !== 'ok') ok = false;
     cell.className = `status-mod ${ok ? 'ok' : 'bad'}`;
     cell.dataset.testid = `status-${name}`;
+    const summary = moduleSummary(name, m);
+    const detail = (name === 'brain' && m.llm && m.llm.severity !== 'ok')
+      ? `<div class="val warn">${escapeHTML(m.llm.message)}${m.llm.action ? ' — ' + escapeHTML(m.llm.action) : ''}</div>`
+      : '';
     cell.innerHTML = `
       <div class="name"><span class="pip"></span>${name}</div>
-      <div class="val">${moduleSummary(name, m)}</div>
+      <div class="val">${summary}</div>
+      ${detail}
     `;
     grid.appendChild(cell);
   }

@@ -6,7 +6,7 @@
 
 ## System Overview
 
-Merlin is an ambient AI companion on Ezra's desk. All local, no cloud. Can run on two or three machines depending on configuration.
+Merlin is an ambient AI companion on the Hero's desk. All local, no cloud. Can run on two or three machines depending on configuration.
 
 **Weekend/portable mode:** Brain runs on Ezra's Mac (when Nate's Mac is offline).
 **Full mode:** Brain runs on Nate's Mac (more GPU headroom).

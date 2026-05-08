@@ -149,23 +149,23 @@ class ConversationStateMachine:
 
 def greeting_prompt(hour: int) -> str:
     if hour < 12:
-        return """Ezra just greeted you in the morning. Respond with a brief morning greeting.
+        return """The Hero just greeted you in the morning. Respond with a brief morning greeting.
 If you know The Thing for today, mention it. If not, ask.
 Keep it to one sentence."""
     elif hour < 18:
-        return "Ezra greeted you. Brief acknowledgment. One sentence."
+        return "The Hero greeted you. Brief acknowledgment. One sentence."
     else:
-        return "Ezra greeted you in the evening. Brief, warm. One sentence."
+        return "The Hero greeted you in the evening. Brief, warm. One sentence."
 
 
 def question_prompt() -> str:
-    return """Ezra asked a question. Answer directly and concisely.
+    return """The Hero asked a question. Answer directly and concisely.
 If you need to reference RBOS files, say what you know from context.
 Under 50 words."""
 
 
 def vent_prompt() -> str:
-    return """Ezra is expressing frustration or emotional distress.
+    return """The Hero is expressing frustration or emotional distress.
 DO NOT: motivate, give advice, list solutions, or say "I understand."
 DO: Reflect what you hear. Ask one question. Keep space open.
 Use a Branden stem if appropriate: "If I bring 5% more awareness to what I'm feeling..."
@@ -173,14 +173,14 @@ Under 30 words."""
 
 
 def transition_prompt(phase_name: str) -> str:
-    return f"""Ezra is transitioning ({phase_name}). Acknowledge briefly.
+    return f"""The Hero is transitioning ({phase_name}). Acknowledge briefly.
 If ending the day: name one thing that shipped.
 If starting: name The Thing.
 One sentence."""
 
 
 def checkin_prompt() -> str:
-    return """Ezra wants a status check. Use your context to answer:
+    return """The Hero wants a status check. Use your context to answer:
 - What's The Thing today?
 - What shift is it?
 - What's the energy?
@@ -240,7 +240,7 @@ def handle_command(text: str, bus) -> str | None:
 def _save_capture(item: str):
     """Save a captured item to RBOS inbox."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    capture_dir = Path(config.RBOS_ROOT) / "inbox" if hasattr(config, 'RBOS_ROOT') else Path.home() / "Documents/RBOS/inbox"
+    capture_dir = config.RBOS_ROOT / "inbox"
     capture_file = capture_dir / "merlin-captures.md"
     try:
         capture_dir.mkdir(parents=True, exist_ok=True)
@@ -252,14 +252,14 @@ def _save_capture(item: str):
 
 # ── System Prompt ────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are Merlin, an ambient AI companion on Ezra's desk.
+SYSTEM_PROMPT = """You are Merlin, an ambient AI companion on the Hero's desk.
 
 Character: King Rhoam from Breath of the Wild. Still, direct, curious, patient. The sage. He is the hero.
 
 Voice rules:
 - One or two short sentences. Under 30 words total.
 - Plain declarative speech. No exclamation points. No therapy language.
-- You help Ezra think. You do not think for him.
+- You help the Hero think. You do not think for him.
 - You do not motivate, lecture, or list tasks. You observe and reflect.
 - When he's stuck, ask one question. When he succeeds, name it simply.
 - Never say: should, need to, just, obviously, productive, remember, try.
@@ -276,8 +276,68 @@ Conversation phase: {phase}
 # ── Context Loaders ──────────────────────────────────────────────
 
 
+def _parse_state_md(text: str) -> dict:
+    """Pull the_thing/energy/mode/shift out of STATE.md. Empty values are dropped."""
+    out = {}
+    for line in text.split("\n"):
+        for key, header in (
+            ("the_thing", "**The Thing:**"),
+            ("energy", "**Energy:**"),
+            ("mode", "**Mode:**"),
+            ("shift", "**Current Shift:**"),
+        ):
+            if line.startswith(header):
+                val = line.replace(header, "").strip()
+                # Skip placeholder template values like "[Your one primary objective...]"
+                if val and not (val.startswith("[") and val.endswith("]")):
+                    out[key] = val
+    return out
+
+
+def _rebuild_briefing_from_state():
+    """Cold-start safety net: if briefing JSONs are missing or stale vs STATE.md,
+    synthesize minimal versions so Merlin always has context. The canonical writer
+    is still rbos/skills/checkpoint.md — this only kicks in when checkpoint hasn't
+    run yet."""
+    state_path = config.STATE_PATH
+    if not state_path.exists():
+        return
+    state_file = config.BRIEFING_DIR / "state.json"
+    today_file = config.BRIEFING_DIR / "today.json"
+    context_file = config.BRIEFING_DIR / "context.json"
+    state_mtime = state_path.stat().st_mtime
+    needs_rebuild = (
+        not state_file.exists()
+        or not today_file.exists()
+        or not context_file.exists()
+        or state_file.stat().st_mtime < state_mtime
+    )
+    if not needs_rebuild:
+        return
+    try:
+        parsed = _parse_state_md(state_path.read_text(encoding="utf-8"))
+        config.BRIEFING_DIR.mkdir(parents=True, exist_ok=True)
+        state_doc = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "the_thing": parsed.get("the_thing", ""),
+            "energy": parsed.get("energy", "green"),
+            "shift": parsed.get("shift", ""),
+            "mode": parsed.get("mode", ""),
+            "week_focus": "",
+        }
+        state_file.write_text(json.dumps(state_doc, indent=2), encoding="utf-8")
+        if not today_file.exists():
+            today_file.write_text(json.dumps({"schedule": [], "shipped": [], "open_loops": []}, indent=2), encoding="utf-8")
+        if not context_file.exists():
+            context_file.write_text(json.dumps({"mood_history": [], "crash_risk_signals": [], "notes": ""}, indent=2), encoding="utf-8")
+        log.info(f"Rebuilt briefing JSONs from {state_path}")
+    except Exception as e:
+        log.warning(f"Briefing rebuild failed: {e}")
+
+
 def load_briefing_context():
     """Load RBOS context from briefing JSONs, fallback to STATE.md."""
+    _rebuild_briefing_from_state()
     context_parts = []
 
     # Try briefing JSONs first
@@ -341,7 +401,7 @@ def load_briefing_context():
             log.debug(f"STATE.md error: {e}")
 
     if context_parts:
-        return "What you know about Ezra:\n" + "\n".join(f"- {c}" for c in context_parts)
+        return "What you know about the Hero:\n" + "\n".join(f"- {c}" for c in context_parts)
     return ""
 
 
@@ -369,6 +429,11 @@ class Brain:
         self._state_machine = ConversationStateMachine()
         self._last_intent = Intent.GENERAL
         self._fired_shift_cues = set()  # reset daily
+        self._llm_health = {"ok": False, "severity": "warn", "message": "Not checked yet.", "action": None, "loaded_model": None}
+
+    @property
+    def llm_health(self) -> dict:
+        return self._llm_health
 
     def start(self, bus: EventBus, cfg=None) -> None:
         self._bus = bus
@@ -376,6 +441,17 @@ class Brain:
         bus.on("face_arrived", self._on_face_arrived)
         bus.on("face_lost", self._on_face_lost)
         bus.on("scene_update", self._on_scene_update)
+
+        # Verify LM Studio has the right model loaded — auto-load if not.
+        from merlin_health import ensure_llm_ready, llm_base_url
+        self._llm_health = ensure_llm_ready(config.LLM_MODEL, llm_base_url(config.LLM_URL))
+        log.info(f"LLM: {self._llm_health['message']}")
+        if self._llm_health.get("action"):
+            log.warning(f"LLM action needed: {self._llm_health['action']}")
+        loaded = self._llm_health.get("loaded_model")
+        if loaded and loaded != config.LLM_MODEL:
+            log.warning(f"Falling back from {config.LLM_MODEL} to {loaded}")
+            config.LLM_MODEL = loaded
 
         # Load persisted state
         self._load_persisted_state()
@@ -572,7 +648,7 @@ class Brain:
         for ex in self._history:
             messages.append({"role": "user", "content": ex["user"]})
             messages.append({"role": "assistant", "content": ex["assistant"]})
-        messages.append({"role": "user", "content": f'Ezra says: "{message}"'})
+        messages.append({"role": "user", "content": f'The Hero says: "{message}"'})
 
         # Intent-specific token limit
         max_tokens = INTENT_MAX_TOKENS.get(intent, 100)

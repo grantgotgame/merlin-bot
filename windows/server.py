@@ -337,11 +337,22 @@ def create_app(comps: Components, hub: WSHub) -> FastAPI:
             return JSONResponse({"queued": False, "reason": "brain_loading"}, status_code=202)
 
         def _run():
-            response = (
-                comps.brain.process_typed(text)
-                if hasattr(comps.brain, "process_typed")
-                else comps.brain.process(text)
-            )
+            try:
+                print(f"[server] /api/say processing: {text!r}")
+                t0 = time.time()
+                response = (
+                    comps.brain.process_typed(text)
+                    if hasattr(comps.brain, "process_typed")
+                    else comps.brain.process(text)
+                )
+                dt = int((time.time() - t0) * 1000)
+                print(f"[server] /api/say brain returned in {dt}ms: {response!r}")
+            except Exception as e:
+                import traceback
+                print(f"[server] /api/say brain crashed: {e}")
+                traceback.print_exc()
+                comps.bus.emit("system_message", text=f"brain crashed: {e}", level="error")
+                return
             if response and comps.voice:
                 try:
                     if comps.audio:
@@ -478,22 +489,9 @@ def create_app(comps: Components, hub: WSHub) -> FastAPI:
     def camera_jpg():
         jpeg = getattr(comps.tracker, "latest_jpeg", None) if comps.tracker else None
         if not jpeg:
-            # Return a 1x1 transparent placeholder so the <img> tag stays
-            # valid until the tracker produces real frames.
-            placeholder = bytes.fromhex(
-                "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605"
-                "0808070709090808"
-                "0a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c"
-                "2837292c30313434"
-                "1f27393d38323c2e333432ffc0000b0801000100018220000ffc4001f00000"
-                "1050101010101010"
-                "10000000000000000010203040506070809ffc4001fffd9"
-            )
-            return Response(
-                content=placeholder,
-                media_type="image/jpeg",
-                headers={"Cache-Control": "no-store"},
-            )
+            # No frame yet — return 204 so the <img> just stays blank without
+            # spamming the log with placeholder-decode errors.
+            return Response(status_code=204)
         return Response(
             content=jpeg,
             media_type="image/jpeg",
@@ -560,6 +558,7 @@ def _health_payload(comps: Components) -> dict:
             "muted": getattr(comps.brain, "muted", False),
             "history_len": len(getattr(comps.brain, "history", [])),
             "in_window": (time.time() - getattr(comps.brain, "last_response_time", 0)) < comps.settings.get("CONVERSATION_WINDOW"),
+            "llm": getattr(comps.brain, "llm_health", None),
         }
     if comps.tracker is not None:
         modules["tracker"] = {

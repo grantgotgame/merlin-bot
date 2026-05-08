@@ -6,6 +6,7 @@ import re
 import requests
 import time
 import config
+from merlin_health import ensure_llm_ready, llm_base_url
 
 
 class Brain:
@@ -15,7 +16,16 @@ class Brain:
         self.last_response_time = 0
         self.muted = False
         self.greeted_today = False
-        self._check_connection()
+        # Wizard self-management: verify LM Studio + auto-load the right model.
+        # Falls back gracefully if the preferred model isn't available.
+        self.llm_health = ensure_llm_ready(config.LLM_MODEL, llm_base_url(config.LLM_URL))
+        print(f"[brain] LLM: {self.llm_health['message']}")
+        if self.llm_health.get("action"):
+            print(f"[brain] LLM action needed: {self.llm_health['action']}")
+        loaded = self.llm_health.get("loaded_model")
+        if loaded and loaded != config.LLM_MODEL:
+            print(f"[brain] Falling back from {config.LLM_MODEL} to {loaded}")
+            config.LLM_MODEL = loaded
 
     def _emit(self, event, **kwargs):
         if self.bus is not None:
@@ -23,27 +33,6 @@ class Brain:
                 self.bus.emit(event, **kwargs)
             except Exception:
                 pass
-
-    def _check_connection(self):
-        """Verify LM Studio is reachable."""
-        try:
-            url = config.LLM_URL.replace("/chat/completions", "/models")
-            r = requests.get(url, timeout=3)
-            if r.ok:
-                models = r.json().get("data", [])
-                if models:
-                    print(f"[brain] LM Studio connected. Model: {models[0].get('id', 'unknown')}")
-                else:
-                    print("[brain] ⚠️  LM STUDIO HAS NO MODEL LOADED!")
-                    print("[brain] ⚠️  Open LM Studio → search for a model → download → load it")
-                    print("[brain] ⚠️  Merlin CANNOT respond without a model. This is the #1 setup issue.")
-            else:
-                print(f"[brain] LM Studio responded with {r.status_code}.")
-        except requests.ConnectionError:
-            print("[brain] WARNING: Cannot reach LM Studio at localhost:1234.")
-            print("[brain] Start LM Studio and load a model, then restart Merlin.")
-        except Exception as e:
-            print(f"[brain] Connection check error: {e}")
 
     def process(self, text):
         """
@@ -143,12 +132,20 @@ class Brain:
             r = requests.post(
                 config.LLM_URL,
                 json={
+                    "model": config.LLM_MODEL,
                     "messages": messages,
-                    "max_tokens": config.MAX_TOKENS,
+                    # Reasoning models (Gemma 4, GPT-OSS, etc.) emit hidden
+                    # reasoning_content that eats the token budget and leaves
+                    # the visible reply empty. reasoning_effort="low" tells
+                    # LM Studio to skip / minimize reasoning. We also keep a
+                    # generous max_tokens so even partial reasoning leaves
+                    # room for the actual answer.
+                    "reasoning_effort": "low",
+                    "max_tokens": max(config.MAX_TOKENS, 300),
                     "temperature": config.TEMPERATURE,
                     "stream": False,
                 },
-                timeout=30,
+                timeout=180,
             )
             if r.ok:
                 raw = r.json()["choices"][0]["message"]["content"].strip()
@@ -158,7 +155,7 @@ class Brain:
                 print(f"[brain] LLM returned {r.status_code}: {r.text[:200]}")
                 return None
         except requests.Timeout:
-            print("[brain] LLM timed out (30s). Model may be loading.")
+            print("[brain] LLM timed out (180s). Gemma 4 reasoning + GPU contention can be this slow; consider switching to a non-reasoning model like meta-llama-3.1-8b-instruct.")
             return None
         except requests.ConnectionError:
             print("[brain] Can't reach LM Studio. Is it running?")

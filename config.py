@@ -5,8 +5,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from requests.auth import HTTPDigestAuth
 
-# Load .env from RBOS root
-load_dotenv(Path(__file__).parent.parent / ".env")
+# Load .env from repo root
+load_dotenv(Path(__file__).parent / ".env")
 
 # ── Network ──────────────────────────────────────────────────────
 PI_HOST = os.getenv("MERLIN_PI_HOST", "100.87.156.70")
@@ -38,7 +38,7 @@ CAMERA_ONVIF_PTZ = f"http://{CAMERA_IP}/onvif/ptz_service"
 
 # ── LLM — LM Studio (OpenAI-compatible API) ─────────────────────
 LLM_URL = os.getenv("MERLIN_LLM_URL", "http://localhost:1234/v1/chat/completions")
-LLM_MODEL = os.getenv("MERLIN_MODEL", "qwen/qwen3-vl-4b")
+LLM_MODEL = os.getenv("MERLIN_MODEL", "meta-llama-3.1-8b-instruct")
 
 # Legacy Ollama (kept for fallback)
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -79,7 +79,9 @@ UNMUTE_WORDS = ["start listening", "unmute", "wake up"]
 NEVERMIND_WORDS = ["nevermind", "never mind"]
 
 # ── RBOS ─────────────────────────────────────────────────────────
-RBOS_ROOT = Path("/Users/ezradrake/Documents/RBOS")
+# RBOS lives bundled inside the repo. Override with $MERLIN_RBOS_ROOT if needed.
+_REPO_ROOT = Path(__file__).resolve().parent
+RBOS_ROOT = Path(os.environ.get("MERLIN_RBOS_ROOT", _REPO_ROOT / "rbos"))
 STATE_PATH = RBOS_ROOT / "core" / "STATE.md"
 BRIEFING_DIR = RBOS_ROOT / "merlin" / "briefing"
 BRIEFING_POLL_INTERVAL = 900  # 15 minutes
