@@ -204,7 +204,10 @@ class Merlin:
 
         print(f"  You: {text}")
 
-        self.audio.suppress(timeout=60.0)
+        # 240s covers cold-start LLM (~80s) + reasoning (~100s) + TTS playback.
+        # Must be longer than brain.py's 180s LLM timeout or we'd start
+        # transcribing again mid-thinking and lose to GPU contention.
+        self.audio.suppress(timeout=240.0)
         try:
             sounds.listening()
             response = self.brain.process(text)

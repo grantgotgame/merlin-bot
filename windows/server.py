@@ -337,34 +337,39 @@ def create_app(comps: Components, hub: WSHub) -> FastAPI:
             return JSONResponse({"queued": False, "reason": "brain_loading"}, status_code=202)
 
         def _run():
+            # Suppress mic capture for the entire LLM + speak window. Whisper
+            # runs on the same GPU as the LLM (and on the same CPU pool) — if
+            # we keep transcribing background noise during thinking, the LLM
+            # call slows down dramatically and the conversation panel fills
+            # with mishears. Match the voice path in merlin._tick.
+            if comps.audio:
+                comps.audio.suppress(timeout=240.0)
             try:
-                print(f"[server] /api/say processing: {text!r}")
-                t0 = time.time()
-                response = (
-                    comps.brain.process_typed(text)
-                    if hasattr(comps.brain, "process_typed")
-                    else comps.brain.process(text)
-                )
-                dt = int((time.time() - t0) * 1000)
-                print(f"[server] /api/say brain returned in {dt}ms: {response!r}")
-            except Exception as e:
-                import traceback
-                print(f"[server] /api/say brain crashed: {e}")
-                traceback.print_exc()
-                comps.bus.emit("system_message", text=f"brain crashed: {e}", level="error")
-                return
-            if response and comps.voice:
                 try:
-                    if comps.audio:
-                        comps.audio.suppress(timeout=60.0)
+                    print(f"[server] /api/say processing: {text!r}")
+                    t0 = time.time()
+                    response = (
+                        comps.brain.process_typed(text)
+                        if hasattr(comps.brain, "process_typed")
+                        else comps.brain.process(text)
+                    )
+                    dt = int((time.time() - t0) * 1000)
+                    print(f"[server] /api/say brain returned in {dt}ms: {response!r}")
+                except Exception as e:
+                    import traceback
+                    print(f"[server] /api/say brain crashed: {e}")
+                    traceback.print_exc()
+                    comps.bus.emit("system_message", text=f"brain crashed: {e}", level="error")
+                    return
+                if response and comps.voice:
                     try:
                         comps.voice.speak(response)
-                    finally:
-                        if comps.audio:
-                            comps.audio.unsuppress()
-                except Exception as e:
-                    print(f"[server] speak after /say failed: {e}")
-                    comps.bus.emit("system_message", text=f"speak failed: {e}", level="error")
+                    except Exception as e:
+                        print(f"[server] speak after /say failed: {e}")
+                        comps.bus.emit("system_message", text=f"speak failed: {e}", level="error")
+            finally:
+                if comps.audio:
+                    comps.audio.unsuppress()
         threading.Thread(target=_run, daemon=True).start()
         return {"queued": True}
 
