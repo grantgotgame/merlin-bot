@@ -4,6 +4,10 @@ An ambient AI companion that lives on your desk. Sees, hears, thinks, speaks. Al
 
 Merlin is built as an executive functioning (EF) prosthetic for ADHD. It runs on commodity hardware using only open-source, locally-hosted models. When you talk to Merlin, it responds with awareness of your state, schedule, and environment. When you leave the desk and come back, it tells you what you were doing. When you drift for 90 minutes, it says "Still here." When you vent, it reflects instead of advising.
 
+## RBOS
+
+Merlin runs the **Rebel-Builder Operating System** (RBOS) by default. The OS — a plain-text/JSON folder structure of state, rituals, skills, and memory — is bundled at `rbos/`. The bot reads its current focus, energy, and schedule from `rbos/merlin/briefing/*.json`, with `rbos/core/STATE.md` as a fallback. See `rbos/CLAUDE.md` for the operating protocol; override the default location with `MERLIN_RBOS_ROOT`.
+
 ---
 
 ## Architecture

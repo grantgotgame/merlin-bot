@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """RBOS Agent — CLI entry point. REPL or single-shot.
 
-Run from RBOS root:
-    python3 merlin/agent/main.py                         # REPL mode
-    python3 merlin/agent/main.py "What's The Thing?"     # single-shot
-    python3 merlin/agent/main.py --model gemma4:e4b "..." # different model
-    python3 merlin/agent/main.py --no-mcp "..."          # skip MCP servers
+Run from the merlin-bot repo root:
+    python3 agent/main.py                         # REPL mode
+    python3 agent/main.py "What's The Thing?"     # single-shot
+    python3 agent/main.py --model gemma4:e4b "..." # different model
+    python3 agent/main.py --no-mcp "..."          # skip MCP servers
 """
 
 import argparse
@@ -13,13 +13,13 @@ import atexit
 import os
 import sys
 
-# Add RBOS root to path so imports work when run as a script
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+# Add merlin-bot repo root to path so `agent.*` imports work as a script
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from merlin.agent.config import DEFAULT_MODEL, SYSTEM_PROMPT
-from merlin.agent.kernel import AgentKernel
-from merlin.agent.tools.filesystem import default_tools
-from merlin.agent.tools.mcp_bridge import load_mcp_tools
+from agent.config import DEFAULT_MODEL, SYSTEM_PROMPT
+from agent.kernel import AgentKernel
+from agent.tools.filesystem import default_tools
+from agent.tools.mcp_bridge import load_mcp_tools
 
 BOLD = "\033[1m"
 DIM = "\033[2m"

@@ -18,6 +18,22 @@ voices/
 
 # Briefing data (personal state, generated at runtime)
 briefing/*.json
+rbos/merlin/briefing/*.json
+!rbos/merlin/briefing/.gitkeep
+
+# RBOS personal state — keep structure (.gitkeep) but don't commit user content
+rbos/inbox/*
+!rbos/inbox/.gitkeep
+rbos/log/**
+!rbos/log/.gitkeep
+rbos/queue/*
+!rbos/queue/.gitkeep
+rbos/workspace/*
+!rbos/workspace/.gitkeep
+rbos/archive/*
+!rbos/archive/.gitkeep
+rbos/briefing/*.md
+!rbos/briefing/.gitkeep
 
 # Runtime state
 state.json
