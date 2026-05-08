@@ -7,6 +7,7 @@ import requests
 import time
 import config
 from merlin_health import ensure_llm_ready, llm_base_url
+from exemplars import Exemplars
 
 
 class Brain:
@@ -26,6 +27,11 @@ class Brain:
         if loaded and loaded != config.LLM_MODEL:
             print(f"[brain] Falling back from {config.LLM_MODEL} to {loaded}")
             config.LLM_MODEL = loaded
+
+        # Voice anchor: pick a fresh subset of training-set exemplars per
+        # call so the base model copies Merlin's voice without us having to
+        # fine-tune. Loaded once here; selection happens in _call_llm.
+        self.exemplars = Exemplars()
 
     def _emit(self, event, **kwargs):
         if self.bus is not None:
@@ -122,9 +128,29 @@ class Brain:
 
         return response
 
+    def _classify_intent(self, message):
+        """Cheap keyword routing so we can pick category-matching exemplars
+        without paying for an LLM classification call. Wizard tweak: as
+        Merlin gets richer signals (briefing energy, vision context), this
+        can fold those in too."""
+        m = (message or "").lower()
+        # Frustration / red signals
+        if any(w in m for w in ("spiral", "stuck", "frustrat", "can't", "not working", "broken", "fail", "tired", "exhaust", "overwhelm")):
+            return "red_frustrated"
+        # Shipping / green signals
+        if any(w in m for w in ("ship", "shipped", "done", "finish", "deploy", "merged", "committed", "works")):
+            return "green_productive"
+        # Schedule / day questions
+        if any(w in m for w in ("today", "schedule", "next", "what time", "when", "calendar", "meeting", "the thing")):
+            return "schedule_day"
+        return None  # let exemplar selector pick a varied side bucket
+
     def _call_llm(self, message):
         """Send message to LM Studio and return the response text."""
         messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
+        # Few-shot voice anchor — Merlin picks his own examples per turn.
+        if self.exemplars.loaded():
+            messages.extend(self.exemplars.as_few_shot_messages(category=self._classify_intent(message)))
         messages.extend(self.history)
         messages.append({"role": "user", "content": message})
 
