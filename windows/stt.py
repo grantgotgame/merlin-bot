@@ -247,16 +247,39 @@ class STT:
                 "text_len": len(text or ""),
                 "t": _t.time(),
             })
-            # Drop hallucinations: when Whisper itself says the audio probably
-            # wasn't speech (no_speech_prob > 0.85) AND its confidence in the
-            # transcript is low (avg_logprob < -0.7), the "transcript" is
-            # almost always background noise hallucinated as words. Returning
-            # None here keeps these out of the conversation and away from the
-            # brain. The rolling-quality deque still records the attempt, so
-            # the audio-health watcher can flag the underlying cause.
-            if text and no_speech_prob > 0.85 and avg_logprob < -0.7:
-                print(f"[stt] Dropping likely hallucination "
-                      f"(no_speech={no_speech_prob:.2f}, logprob={avg_logprob:.2f}): {text!r}")
+            # Drop hallucinations. Three independent triggers — any one is
+            # enough. The rolling-quality deque still records every attempt
+            # so the audio-health watcher can flag the underlying cause.
+            #
+            #  1. Whisper screams it wasn't speech (no_speech_prob > 0.95).
+            #     Only the most confident not-speech calls drop unconditionally.
+            #  2. Combined signal: no_speech > 0.85 AND avg_logprob < -0.7.
+            #     The original filter — both signals agree it's bad.
+            #  3. Short transcript + moderate no_speech (>0.7). Background
+            #     noise commonly hallucinates as "What?" / "Yes." / "Thank you
+            #     for watching." — short, grammatical, but Whisper itself
+            #     still flags doubt. Drop these to protect the conversation
+            #     from drift.
+            txt = (text or "").strip()
+            short_hallucination = (
+                txt
+                and len(txt) <= 25
+                and no_speech_prob > 0.7
+                and txt.lower().rstrip(".!? ") in {
+                    "what", "yes", "no", "ok", "okay", "thank you",
+                    "thanks for watching", "thank you for watching",
+                    "bye", "goodbye", "uh", "um", "you", "i",
+                }
+            )
+            drop_reason = None
+            if text and no_speech_prob > 0.95:
+                drop_reason = f"no_speech={no_speech_prob:.2f}"
+            elif text and no_speech_prob > 0.85 and avg_logprob < -0.7:
+                drop_reason = f"no_speech={no_speech_prob:.2f}, logprob={avg_logprob:.2f}"
+            elif short_hallucination:
+                drop_reason = f"short-hallucination no_speech={no_speech_prob:.2f}"
+            if drop_reason:
+                print(f"[stt] Dropping likely hallucination ({drop_reason}): {text!r}")
                 self._emit(
                     "stt_complete",
                     text="",

@@ -22,13 +22,14 @@ def _play(samples):
 
 
 def listening():
-    """Soft ascending two-tone chime — Merlin heard you."""
-    duration = 0.25
+    """Soft ascending two-tone chime — Merlin heard you.
+    Volume kept very low (the live orb is the primary feedback channel)."""
+    duration = 0.18
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
 
     # Two quick ascending notes
-    tone1 = np.sin(2 * np.pi * 600 * t[:len(t)//2]) * 0.15
-    tone2 = np.sin(2 * np.pi * 900 * t[len(t)//2:]) * 0.15
+    tone1 = np.sin(2 * np.pi * 600 * t[:len(t)//2]) * 0.04
+    tone2 = np.sin(2 * np.pi * 900 * t[len(t)//2:]) * 0.04
 
     # Fade in/out to avoid clicks
     fade = int(SAMPLE_RATE * 0.02)
@@ -47,7 +48,7 @@ def thinking():
 
     # Soft low hum with gentle wobble
     wobble = 1 + 0.02 * np.sin(2 * np.pi * 4 * t)
-    tone = np.sin(2 * np.pi * 220 * t * wobble) * 0.1
+    tone = np.sin(2 * np.pi * 220 * t * wobble) * 0.03
 
     # Smooth envelope (fade in, sustain, fade out)
     env = np.ones_like(t)
@@ -64,7 +65,7 @@ def acknowledged():
     duration = 0.15
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
 
-    tone = np.sin(2 * np.pi * 500 * t) * 0.1
+    tone = np.sin(2 * np.pi * 500 * t) * 0.03
     fade = int(SAMPLE_RATE * 0.02)
     tone[:fade] *= np.linspace(0, 1, fade)
     tone[-fade:] *= np.linspace(1, 0, fade)
@@ -78,9 +79,9 @@ def greeting():
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
     third = len(t) // 3
 
-    tone1 = np.sin(2 * np.pi * 440 * t[:third]) * 0.12
-    tone2 = np.sin(2 * np.pi * 554 * t[third:2*third]) * 0.12
-    tone3 = np.sin(2 * np.pi * 659 * t[2*third:]) * 0.12
+    tone1 = np.sin(2 * np.pi * 440 * t[:third]) * 0.04
+    tone2 = np.sin(2 * np.pi * 554 * t[third:2*third]) * 0.04
+    tone3 = np.sin(2 * np.pi * 659 * t[2*third:]) * 0.04
 
     fade = int(SAMPLE_RATE * 0.015)
     for tone in [tone1, tone2, tone3]:

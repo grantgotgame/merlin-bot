@@ -65,6 +65,7 @@ class Merlin:
         self.voice = None
         self.brain = None
         self.tracker = None
+        self.self_talk = None  # diagnostic monologue, lazy-started after subsystems
 
         self._running = False
         self._ready = threading.Event()
@@ -128,6 +129,22 @@ class Merlin:
             self._emit_boot("tracker", "ready")
         except Exception as e:
             self._emit_boot("tracker", "failed", str(e))
+
+        # Self-talk: background loop that watches audio health and runs
+        # an internal monologue when something degrades. Safe by design —
+        # only the whitelisted actions in self_talk.py can mutate state.
+        try:
+            from self_talk import SelfTalk
+            self.self_talk = SelfTalk(
+                get_audio=lambda: self.audio,
+                get_stt=lambda: self.stt,
+                get_brain=lambda: self.brain,
+                bus=self.bus,
+            )
+            self.self_talk.start()
+            print("[boot] self-talk: ready")
+        except Exception as e:
+            print(f"[boot] self-talk failed to start: {e}")
 
         # Tell the server thread the heavy subsystems are now in `comps`.
         self.bus.emit("subsystems_ready")
@@ -209,11 +226,15 @@ class Merlin:
         # transcribing again mid-thinking and lose to GPU contention.
         self.audio.suppress(timeout=240.0)
         try:
-            sounds.listening()
+            # NB: don't play listening() yet — brain may reject the utterance
+            # (no wake word, hallucination, mute). The chime would fire on
+            # every random STT transcript otherwise. The Tower's orb is the
+            # always-on feedback channel.
             response = self.brain.process(text)
             if response is None:
                 return
 
+            sounds.listening()  # only chime when Merlin actually engaged
             sounds.thinking()
             print(f"  Merlin: {response}")
             self.bus.emit("merlin_speaks", text=response, source="reply")
@@ -249,6 +270,7 @@ class Merlin:
             self._comps.voice = self.voice
             self._comps.brain = self.brain
             self._comps.tracker = self.tracker
+            self._comps.self_talk = self.self_talk
 
         self.bus.on("subsystems_ready", _on_ready)
 

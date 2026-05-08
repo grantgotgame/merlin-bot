@@ -39,6 +39,7 @@ class Components:
     voice: Any = None
     brain: Any = None
     tracker: Any = None
+    self_talk: Any = None
     started_at: float = field(default_factory=time.time)
     health: dict = field(default_factory=dict)
     latency: dict = field(default_factory=lambda: {"stt_ms": None, "llm_ms": None, "tts_ms": None})
@@ -576,6 +577,11 @@ def _health_payload(comps: Components) -> dict:
             "history_len": len(getattr(comps.brain, "history", [])),
             "in_window": (time.time() - getattr(comps.brain, "last_response_time", 0)) < comps.settings.get("CONVERSATION_WINDOW"),
             "llm": getattr(comps.brain, "llm_health", None),
+        }
+    if comps.self_talk is not None:
+        modules["self_talk"] = {
+            "alive": True,
+            "last_session": getattr(comps.self_talk, "last_session", None),
         }
     if comps.tracker is not None:
         modules["tracker"] = {

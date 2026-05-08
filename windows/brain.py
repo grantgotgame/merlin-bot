@@ -8,6 +8,7 @@ import time
 import config
 from merlin_health import ensure_llm_ready, llm_base_url
 from exemplars import Exemplars
+from briefing_loader import load_briefing_context
 
 
 class Brain:
@@ -145,9 +146,23 @@ class Brain:
             return "schedule_day"
         return None  # let exemplar selector pick a varied side bucket
 
+    def _system_prompt(self):
+        """Build the system prompt at request time so RBOS state (energy,
+        The Thing, schedule) flows in without restart. Refreshed every call
+        — the briefing cache is cheap; this is just JSON reads."""
+        base = config.SYSTEM_PROMPT
+        try:
+            ctx = load_briefing_context()
+        except Exception as e:
+            print(f"[brain] briefing load failed: {e}")
+            ctx = ""
+        if ctx:
+            return f"{base}\n\n{ctx}"
+        return base
+
     def _call_llm(self, message):
         """Send message to LM Studio and return the response text."""
-        messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": self._system_prompt()}]
         # Few-shot voice anchor — Merlin picks his own examples per turn.
         if self.exemplars.loaded():
             messages.extend(self.exemplars.as_few_shot_messages(category=self._classify_intent(message)))
