@@ -226,22 +226,30 @@ class Merlin:
         # transcribing again mid-thinking and lose to GPU contention.
         self.audio.suppress(timeout=240.0)
         try:
-            # NB: don't play listening() yet — brain may reject the utterance
-            # (no wake word, hallucination, mute). The chime would fire on
-            # every random STT transcript otherwise. The Tower's orb is the
-            # always-on feedback channel.
+            # Don't play a sound yet — brain.process() may reject the utterance
+            # (no wake word, already muted, etc.) and we don't want a chime on
+            # every ambient STT segment.
+            #
+            # TODO: split brain.process() into check_engaged() + respond() so
+            # we can play listening() immediately on wake-word detection (before
+            # the LLM call) rather than after the response is already computed.
             response = self.brain.process(text)
             if response is None:
                 return
 
-            sounds.listening()  # only chime when Merlin actually engaged
-            sounds.thinking()
+            # C→G ascending fifth: "I heard you, I'm about to speak."
+            # Plays right before TTS so the user knows Merlin engaged.
+            sounds.listening()
+
             print(f"  Merlin: {response}")
             self.bus.emit("merlin_speaks", text=response, source="reply")
 
             if self.voice:
                 self.voice.speak(response)
-            time.sleep(0.3)
+
+            # E→F: "Your turn." — plays after TTS finishes, closing the cycle.
+            sounds.ready()
+            time.sleep(0.1)
         finally:
             self.audio.unsuppress()
 
