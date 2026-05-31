@@ -51,6 +51,10 @@ class Merlin:
 
         self.bus = EventBus()
         self.settings = Settings()
+        # Apply saved overrides to the config module immediately so every
+        # subsystem (voice, audio, brain, …) sees the user's saved settings
+        # from the very first call — not just after they re-apply them in the UI.
+        self.settings.bootstrap_config_module()
         self.store = Store(bus=self.bus)
 
         # Audio MUST be built on the main thread — WASAPI requires COM STA.

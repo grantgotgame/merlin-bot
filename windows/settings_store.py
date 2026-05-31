@@ -141,3 +141,25 @@ class Settings:
             else:
                 self._overrides.pop(key, None)
             self._save()
+
+    def bootstrap_config_module(self) -> None:
+        """Write all saved overrides into the live config module.
+
+        Must be called once at startup, before any subsystem reads from
+        config.  Without this, overrides stored in config_overrides.json are
+        only reflected in the config module after the user re-applies them
+        through the web UI (because the runtime patch in _apply_hot() is
+        never replayed on boot).
+
+        It is safe to call before subsystems have loaded: every subsystem
+        reads the config module attributes dynamically (not at import time),
+        so they will see the correct values on their first access.
+        """
+        import config as cfg
+        with self._lock:
+            for key, value in self._overrides.items():
+                if hasattr(cfg, key):
+                    setattr(cfg, key, value)
+        if self._overrides:
+            applied = list(self._overrides.keys())
+            print(f"[settings] Bootstrapped {len(applied)} saved override(s): {', '.join(applied)}")
