@@ -1,4 +1,5 @@
 {
   "KOKORO_VOICE": "af_nicole",
-  "KOKORO_SPEED": 1.3
+  "KOKORO_SPEED": 1.3,
+  "PIXY_MIC_DEVICE": 21
 }

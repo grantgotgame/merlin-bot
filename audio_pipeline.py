@@ -241,9 +241,19 @@ class Transcriber:
             log.exception("Transcription error")
             return ""
 
-    def transcribe(self, pcm_bytes: bytes) -> str:
-        """Transcribe PCM audio to text. Returns empty string on failure."""
-        if len(pcm_bytes) < config.MIC_SAMPLE_RATE * 2:  # < 1 second
+    def transcribe(self, pcm_bytes: bytes, min_bytes: int | None = None, *, relaxed_noise: bool = False) -> str:
+        """Transcribe PCM audio to text. Returns empty string on failure.
+
+        min_bytes: floor below which we skip Whisper entirely (saves GPU).
+        relaxed_noise: use a lower no-speech threshold + wake-word prompt so
+            short wake/unmute clips reach Whisper while the bot is sleeping.
+        """
+        threshold = min_bytes if min_bytes is not None else config.MIN_UTTERANCE_BYTES
+        if len(pcm_bytes) < threshold:
+            log.debug(
+                "Skip STT: utterance too short (%d bytes, min %d)",
+                len(pcm_bytes), threshold,
+            )
             return ""
 
         # Write to temp WAV
@@ -258,18 +268,29 @@ class Transcriber:
         try:
             if self._backend == "mlx-whisper":
                 import mlx_whisper
-                result = mlx_whisper.transcribe(
-                    wav_path,
-                    path_or_hf_repo="mlx-community/whisper-small-mlx",
-                    language="en"
-                )
+                kw: dict = {
+                    "path_or_hf_repo": "mlx-community/whisper-small-mlx",
+                    "language": "en",
+                }
+                if relaxed_noise:
+                    # Lower no-speech threshold + wake-word prompt so short
+                    # "wake up" / bot name clips score above the noise floor.
+                    kw["no_speech_threshold"] = config.WHISPER_NO_SPEECH_THRESHOLD_SLEEP
+                    kw["initial_prompt"] = config.SLEEP_WAKE_WHISPER_PROMPT
+                    kw["logprob_threshold"] = -1.2
+                    kw["condition_on_previous_text"] = False
+                result = mlx_whisper.transcribe(wav_path, **kw)
                 text = result.get("text", "").strip()
             else:
                 return ""
 
-            # Filter noise
-            noise = {"", "(silence)", "[BLANK_AUDIO]", "you", "Thank you.",
-                     "Thanks for watching!", "Bye.", ".", ".."}
+            # Filter obvious junk (relaxed mode gets a tighter noise set since
+            # Whisper often produces "you" on short ambient noise clips).
+            if relaxed_noise:
+                noise = {"", "(silence)", "[BLANK_AUDIO]"}
+            else:
+                noise = {"", "(silence)", "[BLANK_AUDIO]", "you", "Thank you.",
+                         "Thanks for watching!", "Bye.", ".", ".."}
             return text if text and text not in noise else ""
 
         except Exception:
@@ -299,11 +320,13 @@ class AudioPipeline:
         self._thread = None
         self._bus = None
         self._suppress_until = 0.0  # timestamp until which VAD is suppressed
+        self._muted = False          # brain mute — lower STT floor + skip suppression
 
     def start(self, bus: EventBus, cfg=None) -> None:
         self._bus = bus
         bus.on("speaking_started", self._on_speaking_started)
         bus.on("speaking_finished", self._on_speaking_finished)
+        bus.on("mute_toggled", self._on_mute_toggled)
 
         self._vad.load()
         self._stt.load()
@@ -317,6 +340,7 @@ class AudioPipeline:
         if self._bus:
             self._bus.off("speaking_started", self._on_speaking_started)
             self._bus.off("speaking_finished", self._on_speaking_finished)
+            self._bus.off("mute_toggled", self._on_mute_toggled)
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -324,14 +348,27 @@ class AudioPipeline:
         return self._thread is not None and self._thread.is_alive()
 
     def _on_speaking_started(self) -> None:
-        self._suppress_until = float('inf')  # suppress indefinitely until finished
+        # While sleeping we must keep VAD live for wake words — never suppress.
+        if self._muted:
+            return
+        self._suppress_until = float('inf')  # suppress until speaking_finished
 
     def _on_speaking_finished(self) -> None:
+        if self._muted:
+            return
         # Resume VAD after padding delay for audio propagation
         self._suppress_until = time.time() + config.ECHO_SUPPRESSION_PADDING
 
     def _is_suppressed(self) -> bool:
+        # During sleep, never suppress — fixes stuck inf after unmute.
+        if self._muted:
+            return False
         return time.time() < self._suppress_until
+
+    def _on_mute_toggled(self, muted: bool = False, **kw) -> None:
+        self._muted = bool(muted)
+        # Always clear any stuck infinite suppression when mute state changes.
+        self._suppress_until = 0.0
 
     def _run(self) -> None:
         log.info("Audio pipeline started")
@@ -339,15 +376,38 @@ class AudioPipeline:
             try:
                 utterance = self._vad.process_chunk(pcm_chunk, suppressed=self._is_suppressed(), bus=self._bus)
                 if utterance:
-                    text = self._stt.transcribe(utterance)
+                    min_bytes = (
+                        config.MIN_UTTERANCE_BYTES_MUTED
+                        if self._muted
+                        else config.MIN_UTTERANCE_BYTES
+                    )
+                    text = self._stt.transcribe(
+                        utterance,
+                        min_bytes=min_bytes,
+                        relaxed_noise=self._muted,
+                    )
+                    utterance_s = len(utterance) / 2 / config.MIC_SAMPLE_RATE
                     if text:
                         # Calculate RMS for logging
                         samples = struct.unpack(f"{len(utterance)//2}h", utterance)
                         rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
-                        duration = len(utterance) / 2 / config.MIC_SAMPLE_RATE
 
-                        log.info(f'Heard: "{text}" (rms={int(rms)}, {duration:.1f}s)')
-                        self._bus.emit("speech", text=text, rms=rms, duration=duration)
+                        log.info(f'Heard: "{text}" (rms={int(rms)}, {utterance_s:.1f}s)')
+                        self._bus.emit("speech", text=text, rms=rms, duration=utterance_s)
+                    else:
+                        samples = struct.unpack(f"{len(utterance)//2}h", utterance)
+                        rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+                        if self._muted:
+                            log.info(
+                                "Sleep/wake: STT returned empty "
+                                "(%d bytes, %.2fs, rms=%d)",
+                                len(utterance), utterance_s, int(rms),
+                            )
+                        else:
+                            log.debug(
+                                "STT empty after VAD (%d bytes, %.2fs, rms=%d)",
+                                len(utterance), utterance_s, int(rms),
+                            )
             except Exception:
                 log.exception("Audio pipeline error (continuing)")
 

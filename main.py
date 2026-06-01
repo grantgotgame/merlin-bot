@@ -1,5 +1,6 @@
 """Merlin v2 — Orchestrator: starts modules, supervises, serves HTTP."""
 
+import atexit
 import http.server
 import json
 import logging
@@ -7,6 +8,8 @@ import signal
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 from event_bus import EventBus
@@ -15,6 +18,7 @@ from voice import Voice
 from brain import Brain
 from vision import Vision
 import config
+import mcp_runtime
 
 # ── Logging ──────────────────────────────────────────────────────
 
@@ -29,6 +33,43 @@ logging.basicConfig(
 )
 log = logging.getLogger("merlin.main")
 
+# MCP subprocesses (Claude extension servers) — started at boot when AUTOSTART_MCP=1
+_MCP_CLIENTS: list = []
+
+
+def _stop_mcp_clients() -> None:
+    mcp_runtime.clear_mcp_tools()
+    for client in _MCP_CLIENTS:
+        try:
+            client.stop()
+        except Exception:
+            log.exception("Error stopping MCP client %s", getattr(client, "name", "?"))
+    _MCP_CLIENTS.clear()
+
+
+def _maybe_autostart_mcp() -> None:
+    """Pre-launch MCP servers so Claude extension tools are warm for brain."""
+    if not config.AUTOSTART_MCP:
+        log.info("MCP autostart disabled (MERLIN_AUTOSTART_MCP)")
+        return
+    try:
+        from agent.tools.mcp_bridge import load_mcp_tools
+    except ImportError:
+        log.warning("MCP autostart skipped — could not import agent.tools.mcp_bridge")
+        return
+    try:
+        mcp_tools, clients = load_mcp_tools(verbose=False)
+        _MCP_CLIENTS.extend(clients)
+        if mcp_tools:
+            mcp_runtime.register_mcp_tools(mcp_tools)
+        if clients:
+            log.info("MCP servers started: %s", ", ".join(c.name for c in clients))
+        else:
+            log.info("MCP autostart: no servers connected")
+    except Exception:
+        log.exception("MCP autostart failed")
+
+
 # ── Module Registry ──────────────────────────────────────────────
 
 
@@ -38,7 +79,7 @@ class ModuleInfo:
         self.instance = instance
         self.restarts = 0
         self.last_restart = None
-        self.restart_times = []  # timestamps of recent restarts
+        self.restart_times = []
         self.failed = False
 
 
@@ -53,6 +94,20 @@ class Orchestrator:
 
     def _on_mute(self, muted=False, **kw):
         self._muted = muted
+        # Forward mute state to USB tracker (non-blocking; tracker may not be running)
+        def _post_tracker() -> None:
+            try:
+                body = json.dumps({"muted": bool(muted)}).encode()
+                req = urllib.request.Request(
+                    f"{config.TRACKER_CONTROL_URL.rstrip('/')}/mute",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=1.5)
+            except (urllib.error.URLError, OSError, TimeoutError):
+                log.debug("Tracker /mute not applied (no USB tracker?)", exc_info=False)
+        threading.Thread(target=_post_tracker, daemon=True, name="tracker-mute").start()
 
     def register(self, name: str, module_class):
         info = ModuleInfo(name, module_class())
@@ -72,20 +127,16 @@ class Orchestrator:
 
     def _restart_module(self, mod: ModuleInfo):
         now = time.time()
-        # Check if too many restarts
         mod.restart_times = [t for t in mod.restart_times if now - t < 60]
         if len(mod.restart_times) >= 3:
             mod.failed = True
             log.critical(f"{mod.name} failed — 3 restarts in 60s, giving up")
             self.bus.emit("module_failed", name=mod.name)
             return
-
         try:
             mod.instance.stop()
         except Exception:
             pass
-
-        # Create fresh instance
         mod.instance = type(mod.instance)()
         self._start_module(mod)
         mod.restarts += 1
@@ -158,16 +209,12 @@ class MerlinHTTPHandler(http.server.BaseHTTPRequestHandler):
                 event_type = data.get("type", "")
                 if event_type in ("face_arrived", "face_lost", "pir_motion"):
                     self.orchestrator.bus.emit(event_type)
-                    self.send_response(200)
-                else:
-                    log.debug(f"Unknown event type: {event_type}")
-                    self.send_response(200)
+                self.send_response(200)
             except Exception:
                 self.send_response(400)
             self.end_headers()
 
         elif self.path == "/stt":
-            # Pi client sends WAV audio, we transcribe and return text
             import tempfile
             audio_data = self.rfile.read(length)
             audio_mod = self._get_module("audio_pipeline")
@@ -202,10 +249,9 @@ class MerlinHTTPHandler(http.server.BaseHTTPRequestHandler):
                 intent = classify_intent(text)
                 reply = brain._think(text, intent=intent)
                 elapsed = time.time() - t0
+                reply = reply or ""
                 if reply:
                     log.info(f'[pi-reply] "{reply}" ({elapsed:.1f}s)')
-                else:
-                    reply = ""
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -236,6 +282,41 @@ class MerlinHTTPHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(503)
                 self.end_headers()
 
+        elif self.path == "/speak":
+            body = json.loads(self.rfile.read(length))
+            text = (body.get("text") or "").strip()
+            if not text:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": "missing text"}).encode())
+            else:
+                log.info(f'[http-speak] "{text[:200]}{"…" if len(text) > 200 else ""}"')
+                self.orchestrator.bus.emit("speak", text=text)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True}).encode())
+
+        elif self.path == "/ptz":
+            body = json.loads(self.rfile.read(length))
+            action = (body.get("action") or "").strip()
+            if action not in config.PTZ_ACTIONS:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"ok": False, "error": "invalid action",
+                                "allowed": sorted(config.PTZ_ACTIONS)}).encode()
+                )
+            else:
+                log.info(f"[http-ptz] {action}")
+                self.orchestrator.bus.emit("ptz_action", action=action)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "action": action}).encode())
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -248,6 +329,17 @@ class MerlinHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/scene":
+            vision = self._get_module("vision")
+            if vision and hasattr(vision, "scene_snapshot"):
+                body = json.dumps(vision.scene_snapshot()).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(503)
+                self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -260,6 +352,7 @@ class MerlinHTTPHandler(http.server.BaseHTTPRequestHandler):
 
 def main():
     orch = Orchestrator()
+    atexit.register(_stop_mcp_clients)
 
     # Register modules
     orch.register("audio_pipeline", AudioPipeline)
@@ -270,6 +363,7 @@ def main():
     # Graceful shutdown
     def shutdown(sig, frame):
         log.info("Shutting down...")
+        _stop_mcp_clients()
         orch.stop_all()
         sys.exit(0)
 
@@ -289,9 +383,13 @@ def main():
 
     # Start all modules
     orch.start_all()
+    _maybe_autostart_mcp()
+
+    # Boot-complete chime
+    orch.bus.emit("speak_nonverbal", sound="ready")
 
     log.info("=" * 50)
-    log.info("Merlin v2 — All modules running")
+    log.info(f"Merlin v2 — {config.BOT_NAME} online")
     log.info(f"Health: http://localhost:{config.TRACKER_LISTEN_PORT}/health")
     log.info("=" * 50)
 

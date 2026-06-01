@@ -14,6 +14,12 @@
       "command": "node",
       "args": ["/Users/ezradrake/Library/Application Support/Claude/Claude Extensions/ant.dir.gh.k6l3.osascript/server/index.js"],
       "enabled": true
+    },
+    "claude-delegate": {
+      "command": "python",
+      "args": ["agent/claude_delegate_mcp_server.py"],
+      "tool_call_timeout": 7200,
+      "enabled": false
     }
   }
 }

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import collections
+import copy
 import enum
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -17,8 +19,50 @@ import requests
 
 from event_bus import EventBus
 import config
+import mcp_runtime
 
 log = logging.getLogger("merlin.brain")
+
+
+# ── Helpers ──────────────────────────────────────────────────────
+
+def _assistant_visible_text(msg: object) -> str:
+    """Extract final spoken content from an OpenAI-style chat message dict."""
+    if not isinstance(msg, dict):
+        return ""
+    return (msg.get("content") or "").strip()
+
+
+def _clip_for_voice(text: str, limit: int = 480) -> str:
+    """Truncate long responses gracefully so TTS stays snappy."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return cut + "…" if cut else text[:limit]
+
+
+# Flexible regex for wake/unmute variants Whisper commonly produces.
+_MUTED_UNMUTE_FLEX_RE = re.compile(
+    r"\b(wake(?:[\s\-]+up)?|wakeup|unmute|unmutes|start\s+listening)\b",
+    re.I,
+)
+
+
+def _speech_unmutes_merlin(text: str) -> bool:
+    """True if this transcript should unmute: list phrases, wake name, or STT variants."""
+    if any(config.heard_contains_phrase(text, w) for w in config.UNMUTE_WORDS):
+        return True
+    if any(config.heard_contains_phrase(text, w) for w in config.WAKE_WORDS):
+        return True
+    t = config.normalize_heard_text(text)
+    if not t:
+        return False
+    if _MUTED_UNMUTE_FLEX_RE.search(t):
+        return True
+    n = re.escape(config.BOT_NAME.strip().lower())
+    if re.search(rf"\b({n}|hey\s+{n}|hi\s+{n}|ok\s+{n})\b", t, re.I):
+        return True
+    return False
 
 
 # ── Intent Classification ───────────────────────────────────────
@@ -38,7 +82,14 @@ INTENT_RULES = [
     # COMMAND — short-circuits LLM entirely
     (Intent.COMMAND, [
         r"^capture[:\s]", r"^remind me", r"^set timer", r"^mute", r"^unmute",
-        r"^what time is it", r"^timer",
+        r"^what time is it", r"^what date is it", r"^what day is it",
+        r"^date", r"^time",
+        r"\b(what('s| is)\s+the\s+time|current\s+time|time\s+now)\b",
+        r"\b(what('s| is)\s+the\s+date|today'?s\s+date|current\s+date)\b",
+        r"^look\b", r"^scan\b", r"^pan\b",
+        r"\blook\s+(left|right|up|down|around|center|centre|straight|ahead|forward)\b",
+        r"\bscan\s+(the\s+)?room\b",
+        r"\bpan\s+(left|right|up|down)\b",
     ]),
     # GREETING
     (Intent.GREETING, [
@@ -76,11 +127,25 @@ INTENT_RULES = [
 def classify_intent(text: str) -> Intent:
     """Classify user intent from text. First match wins."""
     text_lower = text.lower().strip()
+    bot_name = config.BOT_NAME.lower()
+    if re.search(rf"\b(hey|hi|hello)\s+{re.escape(bot_name)}\b", text_lower):
+        return Intent.GREETING
     for intent, patterns in INTENT_RULES:
         for pattern in patterns:
             if re.search(pattern, text_lower):
                 return intent
     return Intent.GENERAL
+
+
+def is_scene_query(text: str) -> bool:
+    """Detect direct requests for what the camera can see right now."""
+    text_lower = text.lower().strip()
+    patterns = [
+        r"\bwhat do you see\b", r"\bwhat can you see\b", r"\bwhat are you seeing\b",
+        r"\bdescribe (what you see|the scene|the room|my desk)\b",
+        r"\blook around\b", r"\bwhat's in (the room|front of you)\b",
+    ]
+    return any(re.search(p, text_lower) for p in patterns)
 
 
 # ── Conversation State Machine ──────────────────────────────────
@@ -125,22 +190,15 @@ class ConversationStateMachine:
         self._last_update = time.time()
 
     def update(self, intent: Intent, hour: int) -> ConvoPhase:
-        """Update phase based on new intent. Returns current phase."""
-        # Check decay first
         elapsed = time.time() - self._last_update
         decay_limit = PHASE_DECAY.get(self.phase)
         if decay_limit and elapsed > decay_limit:
             self.phase = ConvoPhase.IDLE
-
-        # Check for transition
         key = (self.phase, intent)
         if key in PHASE_TRANSITIONS:
             self.phase = PHASE_TRANSITIONS[key]
-
-        # Time-based overrides
         if hour >= 22 and intent == Intent.GENERAL:
             self.phase = ConvoPhase.WINDING_DOWN
-
         self._last_update = time.time()
         return self.phase
 
@@ -149,23 +207,26 @@ class ConversationStateMachine:
 
 def greeting_prompt(hour: int) -> str:
     if hour < 12:
-        return """The Hero just greeted you in the morning. Respond with a brief morning greeting.
+        return f"""{config.BOT_OPERATOR} just greeted you in the morning. Respond with a brief morning greeting.
 If you know The Thing for today, mention it. If not, ask.
 Keep it to one sentence."""
     elif hour < 18:
-        return "The Hero greeted you. Brief acknowledgment. One sentence."
+        return f"{config.BOT_OPERATOR} greeted you. Brief acknowledgment. One sentence."
     else:
-        return "The Hero greeted you in the evening. Brief, warm. One sentence."
+        return f"{config.BOT_OPERATOR} greeted you in the evening. Brief, warm. One sentence."
 
 
 def question_prompt() -> str:
-    return """The Hero asked a question. Answer directly and concisely.
+    return f"""{config.BOT_OPERATOR} asked a question. Give the direct answer only — no reasoning, no setup.
+For yes/no questions, start with exactly "Yes." or "No.". For true/false, start with "True." or "False.".
+World knowledge, definitions, how things work: answer directly. Only use the camera view for what is
+physically visible in the room right now.
 If you need to reference RBOS files, say what you know from context.
 Under 50 words."""
 
 
 def vent_prompt() -> str:
-    return """The Hero is expressing frustration or emotional distress.
+    return f"""{config.BOT_OPERATOR} is expressing frustration or emotional distress.
 DO NOT: motivate, give advice, list solutions, or say "I understand."
 DO: Reflect what you hear. Ask one question. Keep space open.
 Use a Branden stem if appropriate: "If I bring 5% more awareness to what I'm feeling..."
@@ -173,14 +234,14 @@ Under 30 words."""
 
 
 def transition_prompt(phase_name: str) -> str:
-    return f"""The Hero is transitioning ({phase_name}). Acknowledge briefly.
+    return f"""{config.BOT_OPERATOR} is transitioning ({phase_name}). Acknowledge briefly.
 If ending the day: name one thing that shipped.
 If starting: name The Thing.
 One sentence."""
 
 
 def checkin_prompt() -> str:
-    return """The Hero wants a status check. Use your context to answer:
+    return f"""{config.BOT_OPERATOR} wants a status check. Use your context to answer:
 - What's The Thing today?
 - What shift is it?
 - What's the energy?
@@ -188,7 +249,7 @@ Be direct. Bullet points. Under 50 words."""
 
 
 def general_prompt() -> str:
-    return "Respond naturally. Brief. Under 30 words."
+    return "Respond naturally. Direct answer only, no reasoning trail. Brief. Under 30 words."
 
 
 INTENT_PROMPTS = {
@@ -200,16 +261,64 @@ INTENT_PROMPTS = {
     Intent.GENERAL: lambda h: general_prompt(),
 }
 
-# Max tokens per intent — shorter for simple, longer for questions
 INTENT_MAX_TOKENS = {
     Intent.GREETING: 60,
     Intent.VENT: 80,
     Intent.CHECK_IN: 150,
     Intent.COMMAND: 30,
     Intent.TRANSITION: 60,
-    Intent.QUESTION: 200,
+    Intent.QUESTION: 280,
     Intent.GENERAL: 100,
 }
+
+
+# ── System Prompt + MCP Guidance ────────────────────────────────
+
+SYSTEM_PROMPT = """You are {bot_name}, an ambient AI companion on {bot_operator}'s desk.
+
+Character: {bot_character}
+Persona: {bot_persona}
+Personality: {bot_personality}
+
+Voice rules:
+- One or two short sentences. Under 30 words total.
+- Plain declarative speech. No exclamation points. No therapy language.
+- Answer the question asked only. Never narrate reasoning or uncertainty.
+- No "I think", "let me", or thinking out loud. Give the conclusion only.
+- Straight trivia, definitions, how-to: answer directly.
+- You help {bot_operator} think. You do not think for him.
+- You do not motivate, lecture, or list tasks. You observe and reflect.
+- When he's stuck, ask one question. When he succeeds, name it simply.
+- Never say: should, need to, just, obviously, productive, remember, try.
+
+{intent_prompt}
+
+Current time: {time}
+Conversation phase: {phase}
+{rbos_context}
+{scene_context}
+/no_think"""
+
+# Appended when MCP tools are connected.
+MCP_TOOL_GUIDANCE = """You have function-calling tools for Apple Notes, Messages (iMessage/SMS), and Mac automation.
+When {operator} asks to create or change a note, search Notes, send a text, or drive Mac apps,
+call the correct tool. Do not say you saved a note or sent a message unless a tool returned success.
+After tools finish, reply in one or two short sentences for voice, under 30 words unless reporting an error.
+
+Messages — strict rules: before send_imessage call search_contacts using the name {operator} said.
+Never send to an unverified number. If unsure, ask one short clarifying question."""
+
+CLAUDE_DELEGATE_MCP_GUIDANCE = """Claude Code delegation:
+When {operator} asks you to have Claude Code do real work in a repo (refactor, fix bugs, coding tasks),
+call the tool **claude-delegate__delegate_to_claude_code** with a clear **task** string.
+Do not claim Claude did the work unless the tool returned a result. Use delegation for coding/repo work only."""
+
+NO_MCP_TOOLS_GUIDANCE = """Integration status: you have NO connected tools this session.
+If {operator} asks to save a note, send a text, or change anything outside this chat,
+say honestly that you cannot — integrations are not connected. One short sentence."""
+
+BRAIN_APPLE_INTEGRATIONS_OFF_GUIDANCE = """Apple Notes, Contacts, and Messages integrations are off this session.
+Do not call tools for them and do not imply those actions happened."""
 
 
 # ── Command Handler ─────────────────────────────────────────────
@@ -225,8 +334,21 @@ def handle_command(text: str, bus) -> str | None:
         return f"Captured: {item}"
 
     # Time
-    if "what time is it" in text_lower:
+    if (
+        "what time is it" in text_lower
+        or re.search(r"\b(what('s| is)\s+the\s+time|current\s+time|time\s+now)\b", text_lower)
+        or text_lower in {"time", "time?"}
+    ):
         return datetime.now().strftime("It's %I:%M %p.")
+
+    # Date
+    if (
+        "what date is it" in text_lower
+        or "what day is it" in text_lower
+        or re.search(r"\b(what('s| is)\s+the\s+date|today'?s\s+date|current\s+date)\b", text_lower)
+        or text_lower in {"date", "date?"}
+    ):
+        return datetime.now().strftime("Today is %A, %B %#d, %Y.")
 
     # Remind
     if re.match(r"^remind me[:\s]+(.+)", text_lower):
@@ -234,13 +356,39 @@ def handle_command(text: str, bus) -> str | None:
         _save_capture(f"REMINDER: {item}")
         return f"I'll remind you: {item}"
 
+    # Timer — no OS alarm yet; log like a reminder so nothing is dropped silently.
+    if re.search(r"\b(set\s+(a\s+)?timer|start\s+(a\s+)?timer)\b", text_lower):
+        _save_capture(f"TIMER: {text.strip()}")
+        return "I can't fire the system clock yet. Saved as a reminder. Use Clock for a real alarm."
+
+    # Camera movement
+    if re.search(r"\b(look|scan|pan)\b", text_lower):
+        if re.search(r"\bleft\b", text_lower):
+            bus.emit("ptz_action", action="look_left")
+            return "Looking left."
+        if re.search(r"\bright\b", text_lower):
+            bus.emit("ptz_action", action="look_right")
+            return "Looking right."
+        if re.search(r"\bup\b", text_lower):
+            bus.emit("ptz_action", action="look_up")
+            return "Looking up."
+        if re.search(r"\bdown\b", text_lower):
+            bus.emit("ptz_action", action="look_down")
+            return "Looking down."
+        if re.search(r"\b(center|centre|straight|ahead|forward)\b", text_lower):
+            bus.emit("ptz_action", action="look_center")
+            return "Centering."
+        if re.search(r"\b(around|room|scan)\b", text_lower):
+            bus.emit("ptz_action", action="look_around")
+            return "Scanning the room."
+
     return None
 
 
 def _save_capture(item: str):
     """Save a captured item to RBOS inbox."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    capture_dir = config.RBOS_ROOT / "inbox"
+    capture_dir = Path(config.RBOS_ROOT) / "inbox" if hasattr(config, "RBOS_ROOT") else Path.home() / "Documents/RBOS/inbox"
     capture_file = capture_dir / "merlin-captures.md"
     try:
         capture_dir.mkdir(parents=True, exist_ok=True)
@@ -250,34 +398,10 @@ def _save_capture(item: str):
     except Exception as e:
         log.error(f"Capture failed: {e}")
 
-# ── System Prompt ────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """You are Merlin, an ambient AI companion on the Hero's desk.
-
-Character: King Rhoam from Breath of the Wild. Still, direct, curious, patient. The sage. He is the hero.
-
-Voice rules:
-- One or two short sentences. Under 30 words total.
-- Plain declarative speech. No exclamation points. No therapy language.
-- You help the Hero think. You do not think for him.
-- You do not motivate, lecture, or list tasks. You observe and reflect.
-- When he's stuck, ask one question. When he succeeds, name it simply.
-- Never say: should, need to, just, obviously, productive, remember, try.
-
-{intent_prompt}
-
-Current time: {time}
-Conversation phase: {phase}
-{rbos_context}
-{scene_context}
-/no_think"""
-
 
 # ── Context Loaders ──────────────────────────────────────────────
 
-
 def _parse_state_md(text: str) -> dict:
-    """Pull the_thing/energy/mode/shift out of STATE.md. Empty values are dropped."""
     out = {}
     for line in text.split("\n"):
         for key, header in (
@@ -288,59 +412,15 @@ def _parse_state_md(text: str) -> dict:
         ):
             if line.startswith(header):
                 val = line.replace(header, "").strip()
-                # Skip placeholder template values like "[Your one primary objective...]"
                 if val and not (val.startswith("[") and val.endswith("]")):
                     out[key] = val
     return out
 
 
-def _rebuild_briefing_from_state():
-    """Cold-start safety net: if briefing JSONs are missing or stale vs STATE.md,
-    synthesize minimal versions so Merlin always has context. The canonical writer
-    is still rbos/skills/checkpoint.md — this only kicks in when checkpoint hasn't
-    run yet."""
-    state_path = config.STATE_PATH
-    if not state_path.exists():
-        return
-    state_file = config.BRIEFING_DIR / "state.json"
-    today_file = config.BRIEFING_DIR / "today.json"
-    context_file = config.BRIEFING_DIR / "context.json"
-    state_mtime = state_path.stat().st_mtime
-    needs_rebuild = (
-        not state_file.exists()
-        or not today_file.exists()
-        or not context_file.exists()
-        or state_file.stat().st_mtime < state_mtime
-    )
-    if not needs_rebuild:
-        return
-    try:
-        parsed = _parse_state_md(state_path.read_text(encoding="utf-8"))
-        config.BRIEFING_DIR.mkdir(parents=True, exist_ok=True)
-        state_doc = {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "the_thing": parsed.get("the_thing", ""),
-            "energy": parsed.get("energy", "green"),
-            "shift": parsed.get("shift", ""),
-            "mode": parsed.get("mode", ""),
-            "week_focus": "",
-        }
-        state_file.write_text(json.dumps(state_doc, indent=2), encoding="utf-8")
-        if not today_file.exists():
-            today_file.write_text(json.dumps({"schedule": [], "shipped": [], "open_loops": []}, indent=2), encoding="utf-8")
-        if not context_file.exists():
-            context_file.write_text(json.dumps({"mood_history": [], "crash_risk_signals": [], "notes": ""}, indent=2), encoding="utf-8")
-        log.info(f"Rebuilt briefing JSONs from {state_path}")
-    except Exception as e:
-        log.warning(f"Briefing rebuild failed: {e}")
-
-
-def load_briefing_context():
+def load_briefing_context() -> str:
     """Load RBOS context from briefing JSONs, fallback to STATE.md."""
-    _rebuild_briefing_from_state()
     context_parts = []
 
-    # Try briefing JSONs first
     state_file = config.BRIEFING_DIR / "state.json"
     today_file = config.BRIEFING_DIR / "today.json"
 
@@ -384,7 +464,6 @@ def load_briefing_context():
         except Exception as e:
             log.debug(f"Briefing context.json error: {e}")
 
-    # Fallback to STATE.md if no briefing data
     if not context_parts:
         try:
             state = config.STATE_PATH.read_text()
@@ -401,7 +480,7 @@ def load_briefing_context():
             log.debug(f"STATE.md error: {e}")
 
     if context_parts:
-        return "What you know about the Hero:\n" + "\n".join(f"- {c}" for c in context_parts)
+        return f"What you know about {config.BOT_OPERATOR}:\n" + "\n".join(f"- {c}" for c in context_parts)
     return ""
 
 
@@ -416,6 +495,7 @@ class Brain:
         self._history = collections.deque(maxlen=config.CONVERSATION_HISTORY_SIZE)
         self._last_response_time = 0.0
         self._muted = False
+        self._muted_at = 0.0
         self._scene_description = ""
         self._rbos_context = ""
         self._rbos_cache_time = 0.0
@@ -425,15 +505,11 @@ class Brain:
         self._last_face_lost_time = 0.0
         self._last_voice_activity = 0.0
         self._thread = None
-        self._last_spoken = ""  # echo detection
+        self._last_spoken = ""
+        self._startup_face_greeted = False
         self._state_machine = ConversationStateMachine()
         self._last_intent = Intent.GENERAL
-        self._fired_shift_cues = set()  # reset daily
-        self._llm_health = {"ok": False, "severity": "warn", "message": "Not checked yet.", "action": None, "loaded_model": None}
-
-    @property
-    def llm_health(self) -> dict:
-        return self._llm_health
+        self._fired_shift_cues = set()
 
     def start(self, bus: EventBus, cfg=None) -> None:
         self._bus = bus
@@ -442,25 +518,13 @@ class Brain:
         bus.on("face_lost", self._on_face_lost)
         bus.on("scene_update", self._on_scene_update)
 
-        # Verify LM Studio has the right model loaded — auto-load if not.
-        from merlin_health import ensure_llm_ready, llm_base_url
-        self._llm_health = ensure_llm_ready(config.LLM_MODEL, llm_base_url(config.LLM_URL))
-        log.info(f"LLM: {self._llm_health['message']}")
-        if self._llm_health.get("action"):
-            log.warning(f"LLM action needed: {self._llm_health['action']}")
-        loaded = self._llm_health.get("loaded_model")
-        if loaded and loaded != config.LLM_MODEL:
-            log.warning(f"Falling back from {config.LLM_MODEL} to {loaded}")
-            config.LLM_MODEL = loaded
-
-        # Load persisted state
         self._load_persisted_state()
-
-        # Initial context load
         self._refresh_context()
-        log.info("Brain started (intent-aware v2)")
+        log.info(f"Brain started (intent-aware v2) — {config.BOT_NAME} / operator: {config.BOT_OPERATOR}")
 
-        # Background context refresh thread
+        # Sync mute state with listeners after subscriptions exist.
+        self._bus.emit("mute_toggled", muted=self._muted)
+
         self._ctx_running = True
         self._thread = threading.Thread(target=self._context_refresh_loop, daemon=True, name="brain-ctx")
         self._thread.start()
@@ -486,55 +550,84 @@ class Brain:
         text_lower = text.lower().strip()
         self._last_voice_activity = time.time()
 
-        # 0. Echo detection
-        if self._last_spoken:
+        # 0. Echo detection (skip while muted — must not drop wake attempts)
+        if not self._muted and self._last_spoken:
             similarity = SequenceMatcher(None, text_lower, self._last_spoken.lower()).ratio()
             if similarity > 0.5:
                 log.debug(f"Echo detected (similarity={similarity:.2f}), ignoring: {text[:50]}")
                 return
 
-        # 1. Check mute
+        # 1. Muted — flexible wake detection with post-mute guard
         if self._muted:
-            if any(text_lower.startswith(w) for w in config.WAKE_WORDS):
+            if _speech_unmutes_merlin(text):
+                if time.time() - self._muted_at < config.MUTE_UNMUTE_GUARD_SEC:
+                    log.info("Wake phrase ignored (post-mute guard)")
+                    return
                 self._set_muted(False)
-                log.info("Unmuted via wake word")
+                self._last_spoken = ""  # don't echo-filter the very next utterance
+                self._last_response_time = time.time()
+                if config.VERBAL_UNMUTE_ACK:
+                    self._bus.emit("speak", text="I'm listening.")
+                elif config.NONVERBAL_ENABLED:
+                    self._bus.emit("speak_nonverbal", sound="open")
+                else:
+                    self._bus.emit("speak", text="I'm listening.")
+                log.info("Unmuted (from sleep)")
             else:
-                return
+                log.info(f"Muted — ignored: {text[:80]!r}")
+            return
 
         # 2. Conversation controls
         if any(w in text_lower for w in config.NEVERMIND_WORDS):
             self._last_response_time = 0
+            self._bus.emit("speak_nonverbal", sound="close")
             log.info("Conversation closed (nevermind)")
             return
 
-        if any(w in text_lower for w in config.MUTE_WORDS):
+        if config.is_mute_command(text_lower):
             self._set_muted(True)
-            return
-
-        if any(w in text_lower for w in config.UNMUTE_WORDS):
-            self._set_muted(False)
+            self._bus.emit("speak_nonverbal", sound="close")
             return
 
         # 3. Wake word check
-        has_wake = any(text_lower.startswith(w) for w in config.WAKE_WORDS) or \
-                   any(w in text_lower for w in config.WAKE_WORDS)
+        has_wake = any(text_lower.startswith(w) for w in config.WAKE_WORDS) or any(
+            config.heard_contains_phrase(text_lower, w) for w in config.WAKE_WORDS
+        )
         in_convo = (time.time() - self._last_response_time) < config.CONVERSATION_WINDOW
 
         if not has_wake and not in_convo:
             log.debug(f"Ignoring (no wake word, outside window): {text[:50]}")
             return
 
-        # Extract message (strip wake word)
+        if has_wake and not in_convo:
+            self._bus.emit("speak_nonverbal", sound="open")
+
+        # Strip wake word prefix
         message = text
         if has_wake:
-            for w in ["hey merlin,", "hey merlin", "hi merlin,", "hi merlin",
-                       "ok merlin,", "ok merlin", "merlin,", "merlin"]:
-                if text_lower.startswith(w):
-                    message = text[len(w):].strip()
+            wake_prefixes = []
+            for wake in sorted(config.WAKE_WORDS, key=len, reverse=True):
+                wake_prefixes.extend([f"{wake},", f"{wake}"])
+            for prefix in wake_prefixes:
+                if text_lower.startswith(prefix):
+                    message = text[len(prefix):].strip()
                     break
 
         if not message:
             message = "you said my name"
+
+        # Nonverbal: start processing
+        self._bus.emit("speak_nonverbal", sound="thinking")
+
+        # Direct scene query: answer from vision cache without LLM
+        if is_scene_query(message):
+            response = self._scene_description.strip() if self._scene_description else ""
+            if not response:
+                response = "I'm still scanning the scene. Ask again in a moment."
+            self._last_spoken = response
+            self._bus.emit("speak", text=response)
+            self._last_response_time = time.time()
+            return
 
         # 4. Classify intent
         intent = classify_intent(message)
@@ -543,16 +636,20 @@ class Brain:
         self._last_intent = intent
         log.info(f"Intent: {intent.name} | Phase: {phase.name} | \"{message[:50]}\"")
 
-        # 5. COMMAND short-circuit — no LLM needed
+        # 5. COMMAND short-circuit; fall through to LLM if no handler
         if intent == Intent.COMMAND:
             response = handle_command(message, self._bus)
             if response:
                 self._last_spoken = response
                 self._bus.emit("speak", text=response)
                 self._last_response_time = time.time()
-            return
+                return
+            # No built-in handler — treat as GENERAL so LLM can answer
+            intent = Intent.GENERAL
+            phase = self._state_machine.update(intent, hour)
+            log.info("COMMAND had no handler — falling back to LLM (GENERAL)")
 
-        # 6. Think with intent context
+        # 6. Think
         self._refresh_context_if_stale()
         response = self._think(message, intent, phase)
 
@@ -562,7 +659,6 @@ class Brain:
             self._last_response_time = time.time()
 
     def _on_face_arrived(self, **kw) -> None:
-        """Handle face arrival — with context recovery."""
         now = time.time()
         today = date.today()
         hour = datetime.now().hour
@@ -571,72 +667,182 @@ class Brain:
             self._last_seen_time = now
             return
 
-        # Reset daily state
         if self._greeting_date != today:
             self._greeted_today = False
             self._greeting_date = today
             self._fired_shift_cues = set()
 
-        if not self._greeted_today:
-            # First arrival today — morning greeting
-            greeting = "Morning." if hour < 12 else "Hey."
+        # Always greet once per app run on first face lock
+        if not self._startup_face_greeted:
+            greeting = (
+                self._build_arrival_greeting(hour)
+                if not self._greeted_today
+                else self._build_startup_face_greeting(hour)
+            )
+            self._bus.emit("speak", text=greeting)
+            self._startup_face_greeted = True
+            if not self._greeted_today:
+                self._greeted_today = True
+                self._state_machine.update(Intent.GREETING, hour)
+            log.info(f"Startup face greeting: {greeting}")
+
+        elif not self._greeted_today:
+            greeting = self._build_arrival_greeting(hour)
             self._bus.emit("speak", text=greeting)
             self._greeted_today = True
             self._state_machine.update(Intent.GREETING, hour)
             log.info(f"Greeted: {greeting}")
-        elif self._last_face_lost_time > 0 and self._greeted_today and (now - self._last_seen_time) > 60:
-            # Context recovery — only if genuinely returned (last seen > 60s ago)
+
+        elif self._last_face_lost_time > 0 and self._greeted_today and (now - self._last_seen_time) > 10:
             absence = now - self._last_face_lost_time
             the_thing = self._extract_the_thing()
 
-            if 300 <= absence < 900:  # 5-15 min
+            if 10 <= absence < 300:
+                msg = self._build_return_greeting()
+                self._bus.emit("speak", text=msg)
+            elif 300 <= absence < 900:
                 msg = f"Welcome back. {the_thing}" if the_thing else "Welcome back."
                 self._bus.emit("speak", text=msg)
-                log.info(f"Context recovery (short): {msg}")
-            elif 900 <= absence < 2700:  # 15-45 min
+            elif 900 <= absence < 2700:
                 minutes = int(absence / 60)
                 msg = f"You left {minutes} minutes ago. {the_thing}" if the_thing else f"Welcome back. {minutes} minutes."
                 self._bus.emit("speak", text=msg)
-                log.info(f"Context recovery (medium): {msg}")
-            elif absence >= 2700:  # 45+ min
+            elif absence >= 2700:
                 msg = f"Been a while. {the_thing} Still on it?" if the_thing else "Been a while."
                 self._bus.emit("speak", text=msg)
-                log.info(f"Context recovery (long): {msg}")
 
         self._last_seen_time = now
         self._persist_state()
 
+    def _build_arrival_greeting(self, hour: int) -> str:
+        op = config.BOT_OPERATOR
+        if hour < 12:
+            return random.choice([
+                f"Good morning, {op}. There you are.",
+                f"Morning, {op}. Ready when you are.",
+                f"Hey {op}, morning.",
+            ])
+        if hour < 18:
+            return random.choice([
+                f"Good afternoon, {op}. There you are.",
+                f"Afternoon, {op}.",
+                f"Hey {op}. Afternoon.",
+            ])
+        return random.choice([
+            f"Good evening, {op}. There you are.",
+            f"Evening, {op}.",
+            f"Hey {op}. Evening check-in.",
+        ])
+
+    def _build_return_greeting(self) -> str:
+        op = config.BOT_OPERATOR
+        return random.choice([
+            f"There you are, {op}.",
+            f"Welcome back, {op}.",
+            f"Back on radar, {op}.",
+            f"Ah, there you are.",
+        ])
+
+    def _build_startup_face_greeting(self, hour: int) -> str:
+        op = config.BOT_OPERATOR
+        if hour < 12:
+            return random.choice([f"Good morning again, {op}.", f"Morning, {op}. Eyes on."])
+        if hour < 18:
+            return random.choice([f"Good afternoon, {op}. There you are.", f"Afternoon, {op}."])
+        return random.choice([f"Good evening, {op}. There you are.", f"Evening, {op}."])
+
     def _on_face_lost(self, **kw) -> None:
-        """Handle face departure — record time, evening send-off."""
         self._last_face_lost_time = time.time()
         hour = datetime.now().hour
-
-        # Evening send-off
         if hour >= 22 and self._greeted_today:
             shipped = self._extract_shipped_count()
-            if shipped:
-                self._bus.emit("speak", text=f"You shipped {shipped} things today. Rest.")
-            else:
-                self._bus.emit("speak", text="Rest.")
+            self._bus.emit("speak", text=f"You shipped {shipped} things today. Rest." if shipped else "Rest.")
             log.info("Evening send-off")
-        else:
-            log.debug("Face lost")
 
     def _on_scene_update(self, description: str = "", ts: float = 0, **kw) -> None:
-        """Cache latest scene description from vision module."""
         self._scene_description = description
 
     # ── LLM ──────────────────────────────────────────────────────
 
+    def _think_with_mcp_tools(
+        self,
+        messages: list,
+        max_tokens: int,
+        intent: Intent,
+        message: str,
+    ) -> str | None:
+        """Multi-round OpenAI-style tool calling via MCP (Notes, Messages, Mac automation)."""
+        tools = mcp_runtime.get_openai_tool_definitions()
+        if not tools:
+            return None
+        req_max = max(max_tokens, 512)
+        for round_i in range(config.BRAIN_MCP_MAX_ROUNDS):
+            try:
+                payload = {
+                    "model": config.LLM_MODEL,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "stream": False,
+                    "temperature": 0.5,
+                    "max_tokens": req_max,
+                }
+                payload.update(config.llm_openai_request_extras())
+                resp = requests.post(config.LLM_URL, json=payload, timeout=config.BRAIN_MCP_LLM_TIMEOUT)
+            except Exception:
+                log.exception("LLM error (tool round)")
+                return None
+
+            if resp.status_code != 200:
+                log.warning("LLM tool round failed (%s): %s", resp.status_code, resp.text[:400])
+                return None
+
+            msg = resp.json().get("choices", [{}])[0].get("message", {}) or {}
+            tool_calls = msg.get("tool_calls")
+
+            if tool_calls:
+                messages.append(msg)
+                for i, tc in enumerate(tool_calls):
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") or {}
+                    name = fn.get("name") or tc.get("name")
+                    raw_args = fn.get("arguments", "{}")
+                    if raw_args is None:
+                        raw_args = "{}"
+                    elif not isinstance(raw_args, str):
+                        raw_args = json.dumps(raw_args)
+                    tid = tc.get("id") or f"call_{round_i}_{i}"
+                    log.info("MCP tool call: %s %s", name, raw_args[:300])
+                    result = mcp_runtime.execute_tool(name, raw_args)
+                    messages.append({"role": "tool", "tool_call_id": tid, "content": result})
+                continue
+
+            text = _assistant_visible_text(msg)
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            text = _clip_for_voice(text)
+            if not text:
+                text = "I drew a blank on that one. Ask again in a few words."
+            self._history.append({"user": message, "assistant": text})
+            log.info(f"[{intent.name}] Response (tools): {text}")
+            return text
+
+        log.warning("MCP tool loop exceeded max rounds")
+        return None
+
     def _think(self, message: str, intent: Intent = Intent.GENERAL, phase: ConvoPhase = ConvoPhase.IDLE) -> str | None:
-        """Send message to Ollama with intent-specific prompting."""
+        """Send message to LLM with intent-specific prompting; use MCP tools when enabled."""
         hour = datetime.now().hour
 
-        # Get intent-specific prompt
         prompt_fn = INTENT_PROMPTS.get(intent, INTENT_PROMPTS[Intent.GENERAL])
         intent_prompt = prompt_fn(hour)
 
         system = SYSTEM_PROMPT.format(
+            bot_name=config.BOT_NAME,
+            bot_operator=config.BOT_OPERATOR,
+            bot_character=config.BOT_CHARACTER,
+            bot_persona=config.BOT_PERSONA,
+            bot_personality=config.BOT_PERSONALITY,
             time=datetime.now().strftime("%I:%M %p"),
             intent_prompt=intent_prompt,
             phase=phase.name.lower().replace("_", " "),
@@ -644,40 +850,68 @@ class Brain:
             scene_context=f"What you see: {self._scene_description}" if self._scene_description else "",
         )
 
+        if config.BRAIN_MCP and mcp_runtime.has_mcp_tools():
+            system += "\n\n" + MCP_TOOL_GUIDANCE.format(operator=config.BOT_OPERATOR)
+            if mcp_runtime.has_claude_code_delegate_tool():
+                system += "\n\n" + CLAUDE_DELEGATE_MCP_GUIDANCE.format(operator=config.BOT_OPERATOR)
+        elif config.BRAIN_MCP and not mcp_runtime.has_mcp_tools():
+            system += "\n\n" + NO_MCP_TOOLS_GUIDANCE.format(operator=config.BOT_OPERATOR)
+        else:
+            system += "\n\n" + BRAIN_APPLE_INTEGRATIONS_OFF_GUIDANCE
+
         messages = [{"role": "system", "content": system}]
         for ex in self._history:
             messages.append({"role": "user", "content": ex["user"]})
             messages.append({"role": "assistant", "content": ex["assistant"]})
-        messages.append({"role": "user", "content": f'The Hero says: "{message}"'})
 
-        # Intent-specific token limit
+        # Nudge binary questions toward explicit yes/no
+        binary_question = re.match(
+            r"^\s*(is|are|do|does|did|can|could|will|would|should|has|have|had)\b",
+            message.lower()
+        )
+        if binary_question:
+            user_text = f'{config.BOT_OPERATOR} says: "{message}"\nAnswer with "Yes." or "No." as the first word.'
+        else:
+            user_text = f'{config.BOT_OPERATOR} says: "{message}"'
+        messages.append({"role": "user", "content": user_text})
+
         max_tokens = INTENT_MAX_TOKENS.get(intent, 100)
 
-        try:
-            # Vision context is included as text in the system prompt via
-            # scene_update events from vision.py. No inline image needed —
-            # vision.py pre-computes descriptions in the background.
+        # MCP tool-calling path
+        if config.BRAIN_MCP and mcp_runtime.has_mcp_tools():
+            out = self._think_with_mcp_tools(copy.deepcopy(messages), max_tokens, intent, message)
+            if out is not None:
+                return out
+            log.warning("Brain MCP tool path failed; falling back without tools")
 
-            resp = requests.post(config.LLM_URL, json={
+        try:
+            payload = {
                 "model": config.LLM_MODEL,
                 "messages": messages,
                 "stream": False,
                 "temperature": 0.5,
                 "max_tokens": max_tokens,
-            }, timeout=60)
+            }
+            payload.update(config.llm_openai_request_extras())
+            resp = requests.post(config.LLM_URL, json=payload, timeout=60)
 
             if resp.status_code == 200:
-                text = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                # Strip thinking tags
-                text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-                text = re.sub(r'<\|channel>thought.*?<channel\|>', '', text, flags=re.DOTALL).strip()
+                raw = resp.json()
+                msg = raw.get("choices", [{}])[0].get("message", {}) or {}
+                text = _assistant_visible_text(msg)
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+                text = re.sub(r"<\|channel>thought.*?<channel\|>", "", text, flags=re.DOTALL).strip()
+                text = _clip_for_voice(text)
                 if text:
                     self._history.append({"user": message, "assistant": text})
                     log.info(f"[{intent.name}] Response: {text}")
-                return text or None
-            else:
-                log.error(f"LLM error: {resp.status_code} — {resp.text[:200]}")
-                return None
+                else:
+                    log.warning("LLM returned empty content (model=%s)", config.LLM_MODEL)
+                    text = "I drew a blank on that one. Ask again in a few words."
+                    self._history.append({"user": message, "assistant": text})
+                return text
+            log.error(f"LLM error: {resp.status_code} — {resp.text[:200]}")
+            return None
         except Exception:
             log.exception("LLM error")
             return None
@@ -685,66 +919,54 @@ class Brain:
     # ── Helpers ──────────────────────────────────────────────────
 
     def _extract_the_thing(self) -> str:
-        """Extract The Thing from cached RBOS context."""
         if not self._rbos_context:
             return ""
         for line in self._rbos_context.split("\n"):
             if "focus:" in line.lower() or "thing:" in line.lower():
-                # Extract the value after the colon
                 parts = line.split(":", 1)
                 if len(parts) > 1:
                     return parts[1].strip()
         return ""
 
     def _extract_shipped_count(self) -> int:
-        """Count shipped items from today's briefing context."""
         if not self._rbos_context:
             return 0
-        count = 0
         for line in self._rbos_context.split("\n"):
             if "shipped" in line.lower():
-                # Try to extract items after "Shipped today:"
                 parts = line.split(":", 1)
                 if len(parts) > 1:
                     items = parts[1].strip()
-                    count = len([i for i in items.split(",") if i.strip()])
-        return count
+                    return len([i for i in items.split(",") if i.strip()])
+        return 0
 
     # ── Context ──────────────────────────────────────────────────
 
     def _refresh_context(self):
         self._rbos_context = load_briefing_context()
         self._rbos_cache_time = time.time()
-        if self._rbos_context:
-            log.debug(f"Context refreshed ({len(self._rbos_context)} chars)")
 
     def _refresh_context_if_stale(self):
-        if time.time() - self._rbos_cache_time > 300:  # 5 min
+        if time.time() - self._rbos_cache_time > 300:
             self._refresh_context()
 
     def _context_refresh_loop(self):
         while self._ctx_running:
-            time.sleep(60)  # Check every minute for shift cues + drift
+            time.sleep(60)
             if self._ctx_running:
                 self._check_shift_cues()
                 self._check_drift()
-                # Full context refresh every 5 min
                 if time.time() - self._rbos_cache_time > 300:
                     self._refresh_context()
 
     # ── Shift Cues + Evening Mode ───────────────────────────────
 
     def _check_shift_cues(self):
-        """Fire time-based cues at shift boundaries. Only if face is present."""
         if self._last_seen_time == 0:
             return
-        # Only fire if face was seen recently (within 5 min)
         if time.time() - self._last_seen_time > 300:
             return
-
         hour = datetime.now().hour
         minute = datetime.now().minute
-
         cues = [
             (17, 0, "first_shift_end", "First shift's over."),
             (19, 0, "second_shift_start", "Second shift. What's the thing?"),
@@ -752,38 +974,32 @@ class Brain:
             (23, 30, "late_night", "It's 11:30. The night shift has it."),
             (1, 0, "night_shift", "It's one. Night shift takes over."),
         ]
-
         for cue_hour, cue_min, cue_id, cue_text in cues:
             if hour == cue_hour and minute >= cue_min and cue_id not in self._fired_shift_cues:
                 self._fired_shift_cues.add(cue_id)
                 self._bus.emit("speak", text=cue_text)
-                log.info(f"Shift cue: {cue_text}")
 
     def _check_drift(self):
-        """Detect extended desk time with no voice activity."""
         if self._last_seen_time == 0 or self._last_voice_activity == 0:
             return
-        # Only if face is present (seen within 5 min)
         if time.time() - self._last_seen_time > 300:
             return
-
         silence = time.time() - self._last_voice_activity
         hour = datetime.now().hour
-
-        # 90-min silence during work hours
         if silence > 5400 and 9 <= hour < 22:
             drift_id = f"drift_{int(self._last_voice_activity)}"
             if drift_id not in self._fired_shift_cues:
                 self._fired_shift_cues.add(drift_id)
                 self._bus.emit("speak", text="Still here.")
-                log.info(f"Drift check after {int(silence/60)} min silence")
 
     # ── Mute ─────────────────────────────────────────────────────
 
     def _set_muted(self, muted: bool):
         self._muted = muted
+        if muted:
+            self._muted_at = time.time()
         self._bus.emit("mute_toggled", muted=muted)
-        log.info(f"{'Muted' if muted else 'Unmuted'}")
+        log.info("Muted" if muted else "Unmuted")
 
     # ── State Persistence ────────────────────────────────────────
 
@@ -809,7 +1025,6 @@ class Brain:
                 self._greeting_date = date.today()
             self._last_seen_time = data.get("last_seen_time", 0.0)
             self._last_face_lost_time = data.get("last_face_lost_time", 0.0)
-            # Restore conversation phase
             saved_phase = data.get("convo_phase", "IDLE")
             try:
                 self._state_machine.phase = ConvoPhase[saved_phase]
@@ -826,20 +1041,19 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="[brain] %(message)s")
 
     bus = EventBus()
-    bus.on("speak", lambda text="", **kw: print(f'\n>>> MERLIN: "{text}"\n'))
+    bus.on("speak", lambda text="", **kw: print(f'\n>>> {config.BOT_NAME.upper()}: "{text}"\n'))
 
     brain = Brain()
     brain.start(bus)
 
-    # Test conversation
-    print("Type messages to Merlin (prefix with 'Hey Merlin' or just type after first response):")
+    print(f"Type messages to {config.BOT_NAME} (prefix with 'Hey {config.BOT_NAME}' or just type after first response):")
     while True:
         try:
             user_input = input("You: ").strip()
             if not user_input:
                 continue
             bus.emit("speech", text=user_input, rms=200, duration=2.0)
-            time.sleep(3)  # wait for LLM response
+            time.sleep(3)
         except (KeyboardInterrupt, EOFError):
             break
     print("\nDone.")
