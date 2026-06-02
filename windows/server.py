@@ -43,6 +43,9 @@ class Components:
     started_at: float = field(default_factory=time.time)
     health: dict = field(default_factory=dict)
     latency: dict = field(default_factory=lambda: {"stt_ms": None, "llm_ms": None, "tts_ms": None})
+    # Signalled by server.py restart_audio command; consumed by merlin.py _tick()
+    # on the main thread (required for WASAPI COM STA compatibility).
+    audio_restart_event: threading.Event | None = None
     # Per-subsystem boot state, updated by boot_progress events. Lets
     # late-joining WebSocket clients render the loading banner correctly
     # even if they connect after subsystems_ready.
@@ -447,6 +450,19 @@ def create_app(comps: Components, hub: WSHub) -> FastAPI:
             except Exception:
                 pass
             return {"skipped": True}
+        if name == "restart_audio":
+            evt = comps.audio_restart_event
+            if evt is None:
+                raise HTTPException(503, "audio_restart_event not wired (restart Merlin)")
+            # Signal the main thread to do the restart. The response is
+            # optimistic — the restart itself happens on the next _tick().
+            evt.set()
+            comps.bus.emit(
+                "system_message",
+                text="Audio restart queued — standby for a moment.",
+                level="info",
+            )
+            return {"queued": True}
         raise HTTPException(404, f"unknown command: {name}")
 
     @app.get("/api/history")

@@ -57,6 +57,11 @@ class Merlin:
         self.settings.bootstrap_config_module()
         self.store = Store(bus=self.bus)
 
+        # Signalled by server.py when the user clicks "Restart audio".
+        # _tick() checks this on every iteration and does the restart on the
+        # main thread — the only thread allowed to create WASAPI streams.
+        self._audio_restart_event = threading.Event()
+
         # Audio MUST be built on the main thread — WASAPI requires COM STA.
         # Everything else can come up afterwards on a worker.
         self._emit_boot("audio", "loading")
@@ -212,6 +217,19 @@ class Merlin:
             self.stop()
 
     def _tick(self):
+        # ── Main-thread audio restart (WASAPI requires COM STA context) ──────
+        # server.py sets this event when the user clicks "Restart audio".
+        # Doing the actual restart here keeps it on the main thread.
+        if self._audio_restart_event.is_set():
+            self._audio_restart_event.clear()
+            try:
+                self.audio.restart_device()
+            except Exception as e:
+                err = f"Audio restart failed: {e}"
+                print(f"[audio] {err}")
+                self.bus.emit("system_message", text=err, level="error")
+            return
+
         audio_data = self.audio.get_utterance(timeout=0.2)
         if audio_data is None:
             return
@@ -274,6 +292,7 @@ class Merlin:
             bus=self.bus, settings=self.settings, store=self.store,
             audio=self.audio,
             stt=None, voice=None, brain=None, tracker=None,
+            audio_restart_event=self._audio_restart_event,
         )
 
         # When the loader finishes, swap the lazy refs in.

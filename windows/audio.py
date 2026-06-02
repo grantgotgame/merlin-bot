@@ -23,7 +23,7 @@ import threading
 import queue
 import time
 import config
-from config import PIXY_MIC_DEVICE, SAMPLE_RATE, CHANNELS
+from config import SAMPLE_RATE, CHANNELS
 
 _MIC_CHECK_WINDOW = 10.0   # seconds before warning about no speech detected
 _NO_FRAMES_TIMEOUT = 5.0   # seconds before watchdog fires
@@ -131,15 +131,20 @@ class AudioPipeline:
         """
         Auto-detect EMEET Piko mic and return (device_index, api_name).
 
+        Reads config.PIXY_MIC_DEVICE at call time (not import time) so that
+        settings saved in config_overrides.json and applied by
+        bootstrap_config_module() are honoured on every (re)start.
+
         Preference order:
           1. WASAPI  — Windows Audio Engine applies AEC, removing TTS echo
           2. DirectSound — no AEC but reliable from any thread
           3. MME — last resort
         """
-        if PIXY_MIC_DEVICE is not None:
-            info = sd.query_devices(PIXY_MIC_DEVICE)
+        pixy_device = config.PIXY_MIC_DEVICE   # read dynamically, not at import time
+        if pixy_device is not None:
+            info = sd.query_devices(pixy_device)
             api = sd.query_hostapis(info["hostapi"])["name"]
-            return PIXY_MIC_DEVICE, api
+            return pixy_device, api
 
         devices = sd.query_devices()
         hostapis = sd.query_hostapis()
@@ -433,6 +438,64 @@ class AudioPipeline:
             return self.speech_queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def restart_device(self) -> str:
+        """Stop the stream, re-read device from config, open and restart. MAIN THREAD ONLY.
+
+        WASAPI requires the InputStream to be created on the COM STA thread
+        (the main thread). Never call this from a FastAPI handler or daemon thread.
+        Signal merlin.py via _audio_restart_event and let _tick() call it instead.
+        """
+        old_device = self.mic_device
+
+        # Pause capturing before tearing down the stream so the callback
+        # doesn't try to deliver frames while we're rebuilding.
+        self._running = False
+        self._buffer = []
+        self._accumulating = False
+        self._silence_start = None
+        self._suppressed.clear()
+
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception as e:
+            print(f"[audio] Stream close warning during restart: {e}")
+
+        # Re-detect device — now reads config.PIXY_MIC_DEVICE fresh,
+        # so any override saved via the settings UI is picked up here.
+        self.mic_device, self._api_name = self._find_pixy_mic()
+        dev_info = sd.query_devices(self.mic_device)
+        self._mic_rate = int(dev_info["default_samplerate"])
+
+        self._stream = self._open_stream()
+        self._stream.start()
+
+        # Resume and reset diagnostics
+        self._running = True
+        self._start_time = time.time()
+        self._frames_read = 0
+        self._mic_check_done = False
+        self._utterances_queued = 0
+        self._peak_rms = 0.0
+        self._clip_count = 0
+        self._sample_count = 0
+        self._rms_history.clear()
+
+        # Drain any stale audio that accumulated before the restart
+        while True:
+            try:
+                self.speech_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        msg = (f"Audio restarted: device [{self.mic_device}] ({self._api_name}) "
+               f"at {self._mic_rate}Hz")
+        if old_device != self.mic_device:
+            msg += f" (was [{old_device}])"
+        print(f"[audio] {msg}")
+        self._emit("system_message", text=msg, level="info")
+        return msg
 
     def suppress(self, timeout=15.0):
         """Suppress mic input while Merlin is speaking. Auto-clears after timeout."""
